@@ -7,9 +7,28 @@ modules:
       render: native
       title: Shift & Assignment Manager
       layout: native
+  trigger:
+    - key: jira-assignment-events
+      function: jira-event-handler
+      events:
+        - avi:jira:created:issue
+        - avi:jira:updated:issue
+        - avi:jira:assigned:issue
+        - avi:jira:commented:issue
+      filter:
+        ignoreSelf: true
+  scheduledTrigger:
+    - key: scheduled-assignment-evaluation
+      function: scheduled-handler
+      interval: fiveMinute
   function:
     - key: resolver
       handler: index.handler
+    - key: jira-event-handler
+      handler: index.jiraEventHandler
+    - key: scheduled-handler
+      handler: index.scheduledHandler
+      timeoutSeconds: 300
 resources:
   - key: admin-ui
     path: src/frontend/index.jsx
