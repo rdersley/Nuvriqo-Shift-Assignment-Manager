@@ -1,12 +1,11 @@
 {
   "name": "nuvriqo-shift-assignment-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
-  "type": "module",
   "scripts": {
-    "test": "node --test",
+    "test": "node --experimental-default-type=module --test",
     "build": "echo 'UI Kit resource is bundled by Forge'",
-    "lint:domain": "node --check src/domain/shifts.js && node --check src/engine/rules.js && node --check src/engine/assignment.js && node --check src/index.js",
+    "lint:domain": "node --experimental-default-type=module --check src/domain/shifts.js && node --experimental-default-type=module --check src/domain/shiftGroups.js && node --experimental-default-type=module --check src/engine/rules.js && node --experimental-default-type=module --check src/engine/assignment.js && node --experimental-default-type=module --check src/index.js",
     "check": "npm run lint:domain && npm test"
   },
   "dependencies": {
