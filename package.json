@@ -1,0 +1,16 @@
+{
+  "name": "nuvriqo-shift-assignment-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "build": "echo 'Custom UI build scaffold pending Forge app creation'",
+    "lint:domain": "node --check src/domain/shifts.js && node --check src/engine/rules.js && node --check src/engine/assignment.js"
+  },
+  "dependencies": {
+    "@forge/api": "^5.0.0",
+    "@forge/kvs": "^1.0.0",
+    "@forge/resolver": "^1.7.0"
+  }
+}
