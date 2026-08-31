@@ -5,7 +5,7 @@
   "scripts": {
     "test": "node --experimental-default-type=module --test",
     "build": "echo 'UI Kit resource is bundled by Forge'",
-    "lint:domain": "node --experimental-default-type=module --check src/domain/shifts.js && node --experimental-default-type=module --check src/domain/shiftGroups.js && node --experimental-default-type=module --check src/engine/rules.js && node --experimental-default-type=module --check src/engine/assignment.js && node --experimental-default-type=module --check src/engine/triggers.js && node --experimental-default-type=module --check src/index.js",
+    "lint:domain": "node --experimental-default-type=module --check src/domain/shifts.js && node --experimental-default-type=module --check src/domain/shiftGroups.js && node --experimental-default-type=module --check src/engine/rules.js && node --experimental-default-type=module --check src/engine/assignment.js && node --experimental-default-type=module --check src/engine/triggers.js && node --experimental-default-type=module --check src/background.js && node --experimental-default-type=module --check src/index.js",
     "check": "npm run lint:domain && npm test"
   },
   "dependencies": {
