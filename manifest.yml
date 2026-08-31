@@ -25,9 +25,9 @@ modules:
     - key: resolver
       handler: index.handler
     - key: jira-event-handler
-      handler: index.jiraEventHandler
+      handler: background.jiraEventHandler
     - key: scheduled-handler
-      handler: index.scheduledHandler
+      handler: background.scheduledHandler
       timeoutSeconds: 300
 resources:
   - key: admin-ui
