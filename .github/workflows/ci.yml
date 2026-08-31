@@ -1,4 +1,4 @@
-name: CI
+name: CI and Development Deploy
 
 on:
   push:
@@ -23,3 +23,37 @@ jobs:
 
       - name: Run checks
         run: npm run check
+
+  deploy-development:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
+      FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Forge CLI
+        run: npm install --global @forge/cli@latest
+
+      - name: Verify Forge authentication secrets
+        shell: bash
+        run: |
+          test -n "$FORGE_EMAIL" || (echo "FORGE_EMAIL secret is missing" && exit 1)
+          test -n "$FORGE_API_TOKEN" || (echo "FORGE_API_TOKEN secret is missing" && exit 1)
+
+      - name: Forge lint
+        run: forge lint
+
+      - name: Deploy to development
+        run: forge deploy --environment development --non-interactive
