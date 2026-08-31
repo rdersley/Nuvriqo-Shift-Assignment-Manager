@@ -24,9 +24,7 @@ async function listByPrefix(prefix, limit = 100) {
   return (result.results || []).map(item => item.value);
 }
 
-async function listShiftGroups() {
-  return listByPrefix(SHIFT_PREFIX, 100);
-}
+async function listShiftGroups() { return listByPrefix(SHIFT_PREFIX, 100); }
 
 async function describeUsers(accountIds = [], storedProfiles = []) {
   const stored = Object.fromEntries((storedProfiles || []).filter(p => p?.accountId).map(p => [p.accountId, p.displayName || p.accountId]));
@@ -37,17 +35,14 @@ async function describeUsers(accountIds = [], storedProfiles = []) {
       if (!response.ok) return [accountId, accountId];
       const user = await response.json();
       return [accountId, user.displayName || accountId];
-    } catch {
-      return [accountId, accountId];
-    }
+    } catch { return [accountId, accountId]; }
   }));
   return { ...stored, ...Object.fromEntries(lookedUp) };
 }
 
 function memberProfilesFromPayload(group = {}) {
   return [...new Map((group.memberProfiles || []).filter(p => p?.accountId).map(p => [p.accountId, {
-    accountId: String(p.accountId),
-    displayName: String(p.displayName || p.accountId)
+    accountId: String(p.accountId), displayName: String(p.displayName || p.accountId)
   }])).values()];
 }
 
@@ -79,7 +74,7 @@ function toIssueModel(issue) {
 }
 
 async function getIssue(issueKey) {
-  const res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueKey}?expand=names`);
+  const res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueKey}`);
   if (!res.ok) throw new Error(`Unable to load ${issueKey} (${res.status})`);
   return res.json();
 }
@@ -93,9 +88,7 @@ async function countOpenAssigned(accountIds = [], projectIds = []) {
       if (!res.ok) return [accountId, 0];
       const body = await res.json();
       return [accountId, body.total || 0];
-    } catch {
-      return [accountId, 0];
-    }
+    } catch { return [accountId, 0]; }
   }));
   return Object.fromEntries(entries);
 }
@@ -104,6 +97,27 @@ async function audit(entry) {
   const createdAt = new Date().toISOString();
   const id = `${createdAt}:${Math.random().toString(36).slice(2)}`;
   await kvs.set(`${AUDIT_PREFIX}${id}`, { id, createdAt, ...entry });
+}
+
+async function simulateInternal({ issueKey, trigger = 'issueCreated' }) {
+  const jiraIssue = await getIssue(issueKey);
+  const issue = toIssueModel(jiraIssue);
+  const rules = await listByPrefix(RULE_PREFIX, 100);
+  const matched = matchingRules({ rules, trigger, issue });
+  if (!matched.length) return { issueKey, trigger, matchedRule: null, result: { action: 'none', reason: 'NO_MATCHING_RULE' }, eligible: [] };
+  const rule = matched[0];
+  const groups = (await listShiftGroups()).filter(g => rule.shiftGroupIds.includes(g.id));
+  const at = new Date();
+  const eligible = [...new Set(groups.flatMap(g => getOnShiftMembers({ shiftGroup: g, at, overrides: g.overrides || [] })))];
+  const loads = await countOpenAssigned(eligible, rule.projectIds);
+  const lastAssignedAccountId = await kvs.get(`${ROTATION_PREFIX}${rule.id}`);
+  const result = evaluateAssignment({ rule, issue, eligibleAccountIds: eligible, loads, lastAssignedAccountId });
+  const profiles = groups.flatMap(g => g.memberProfiles || []);
+  const names = Object.fromEntries(profiles.map(p => [p.accountId, p.displayName]));
+  return {
+    issueKey, trigger, matchedRule: rule, result,
+    eligible: eligible.map(accountId => ({ accountId, displayName: names[accountId] || accountId, load: loads[accountId] || 0 }))
+  };
 }
 
 resolver.define('getDashboard', async () => {
@@ -115,23 +129,19 @@ resolver.define('getDashboard', async () => {
     const ids = group.memberAccountIds || [];
     const names = await describeUsers(ids, group.memberProfiles || []);
     const memberProfiles = ids.map(accountId => ({ accountId, displayName: names[accountId] || accountId }));
-    const persisted = JSON.stringify(memberProfiles) !== JSON.stringify(group.memberProfiles || []) ? { ...group, memberProfiles } : group;
-    if (persisted !== group) await kvs.set(`${SHIFT_PREFIX}${group.id}`, persisted);
+    const changed = JSON.stringify(memberProfiles) !== JSON.stringify(group.memberProfiles || []);
+    const persisted = changed ? { ...group, memberProfiles } : group;
+    if (changed) await kvs.set(`${SHIFT_PREFIX}${group.id}`, persisted);
     enriched.push(enrichGroup(persisted, at));
   }
   const rules = (await listByPrefix(RULE_PREFIX, 100)).sort((a, b) => (a.priority ?? 1000) - (b.priority ?? 1000));
-  return {
-    generatedAt: at.toISOString(),
-    groups: enriched,
-    rules,
-    onShiftCount: enriched.reduce((sum, group) => sum + group.onShift.length, 0),
-    enabledRuleCount: rules.filter(r => r.enabled).length
-  };
+  return { generatedAt: at.toISOString(), groups: enriched, rules, onShiftCount: enriched.reduce((sum, g) => sum + g.onShift.length, 0), enabledRuleCount: rules.filter(r => r.enabled).length };
 });
 
 resolver.define('getRoster', async ({ payload }) => {
   await assertAdmin();
   const startAt = new Date(payload?.startAt || Date.now());
+  if (Number.isNaN(startAt.getTime())) throw new Error('Invalid roster start date.');
   const days = Math.min(Math.max(Number(payload?.days || 7), 1), 31);
   const groups = await listShiftGroups();
   const slots = [];
@@ -140,11 +150,7 @@ resolver.define('getRoster', async ({ payload }) => {
       const at = new Date(startAt);
       at.setUTCDate(startAt.getUTCDate() + d);
       at.setUTCHours(hour, 0, 0, 0);
-      const people = [];
-      for (const group of groups) {
-        const enriched = enrichGroup(group, at);
-        for (const user of enriched.onShift) people.push({ ...user, groupId: group.id, groupName: group.name });
-      }
+      const people = groups.flatMap(group => enrichGroup(group, at).onShift.map(user => ({ ...user, groupId: group.id, groupName: group.name })));
       slots.push({ at: at.toISOString(), people });
     }
   }
@@ -173,24 +179,16 @@ resolver.define('saveAssignmentRule', async ({ payload }) => {
   await assertAdmin();
   const raw = payload?.rule || {};
   const id = String(raw.id || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+  const now = new Date().toISOString();
   const rule = {
-    id,
-    name: String(raw.name || '').trim(),
-    enabled: raw.enabled !== false,
-    priority: Math.max(1, Number(raw.priority || 100)),
-    trigger: String(raw.trigger || 'issueCreated'),
-    projectIds: (raw.projectIds || []).map(String).filter(Boolean),
-    conditions: Array.isArray(raw.conditions) ? raw.conditions : [],
-    shiftGroupIds: (raw.shiftGroupIds || []).map(String).filter(Boolean),
-    assignmentStrategy: String(raw.assignmentStrategy || 'roundRobin'),
-    fixedOrder: (raw.fixedOrder || []).map(String).filter(Boolean),
-    forceReassign: Boolean(raw.forceReassign),
-    shiftEndPolicy: String(raw.shiftEndPolicy || 'keep'),
-    noAgentPolicy: String(raw.noAgentPolicy || 'leaveUnassigned'),
+    id, name: String(raw.name || '').trim(), enabled: raw.enabled !== false,
+    priority: Math.max(1, Number(raw.priority || 100)), trigger: String(raw.trigger || 'issueCreated'),
+    projectIds: (raw.projectIds || []).map(String).filter(Boolean), conditions: Array.isArray(raw.conditions) ? raw.conditions : [],
+    shiftGroupIds: (raw.shiftGroupIds || []).map(String).filter(Boolean), assignmentStrategy: String(raw.assignmentStrategy || 'roundRobin'),
+    fixedOrder: (raw.fixedOrder || []).map(String).filter(Boolean), forceReassign: Boolean(raw.forceReassign),
+    shiftEndPolicy: String(raw.shiftEndPolicy || 'keep'), noAgentPolicy: String(raw.noAgentPolicy || 'leaveUnassigned'),
     slaThresholdMinutes: raw.slaThresholdMinutes == null ? null : Number(raw.slaThresholdMinutes),
-    untouchedMinutes: raw.untouchedMinutes == null ? null : Number(raw.untouchedMinutes),
-    updatedAt: new Date().toISOString(),
-    createdAt: raw.createdAt || new Date().toISOString()
+    untouchedMinutes: raw.untouchedMinutes == null ? null : Number(raw.untouchedMinutes), updatedAt: now, createdAt: raw.createdAt || now
   };
   if (!rule.name) throw new Error('Rule name is required.');
   if (!rule.shiftGroupIds.length) throw new Error('Select at least one shift group.');
@@ -211,35 +209,16 @@ resolver.define('simulateAssignment', async ({ payload }) => {
   const issueKey = String(payload?.issueKey || '').trim().toUpperCase();
   const trigger = String(payload?.trigger || 'issueCreated');
   if (!issueKey) throw new Error('Issue key is required.');
-  const jiraIssue = await getIssue(issueKey);
-  const issue = toIssueModel(jiraIssue);
-  const rules = await listByPrefix(RULE_PREFIX, 100);
-  const matched = matchingRules({ rules, trigger, issue });
-  if (!matched.length) return { issueKey, trigger, matchedRule: null, result: { action: 'none', reason: 'NO_MATCHING_RULE' }, eligible: [] };
-  const rule = matched[0];
-  const groups = (await listShiftGroups()).filter(g => rule.shiftGroupIds.includes(g.id));
-  const at = new Date();
-  const eligible = [...new Set(groups.flatMap(g => getOnShiftMembers({ shiftGroup: g, at, overrides: g.overrides || [] })))];
-  const loads = await countOpenAssigned(eligible, rule.projectIds);
-  const lastAssignedAccountId = await kvs.get(`${ROTATION_PREFIX}${rule.id}`);
-  const result = evaluateAssignment({ rule, issue, eligibleAccountIds: eligible, loads, lastAssignedAccountId });
-  const profiles = groups.flatMap(g => g.memberProfiles || []);
-  const names = Object.fromEntries(profiles.map(p => [p.accountId, p.displayName]));
-  return {
-    issueKey,
-    trigger,
-    matchedRule: rule,
-    result,
-    eligible: eligible.map(accountId => ({ accountId, displayName: names[accountId] || accountId, load: loads[accountId] || 0 }))
-  };
+  return simulateInternal({ issueKey, trigger });
 });
 
 resolver.define('executeAssignment', async ({ payload }) => {
   await assertAdmin();
-  const simulation = await resolver.getDefinitions().simulateAssignment?.({ payload });
-  if (!simulation) throw new Error('Unable to evaluate assignment.');
-  if (simulation.result?.action !== 'assign') return simulation;
-  const issueKey = simulation.issueKey;
+  const issueKey = String(payload?.issueKey || '').trim().toUpperCase();
+  const trigger = String(payload?.trigger || 'issueCreated');
+  if (!issueKey) throw new Error('Issue key is required.');
+  const simulation = await simulateInternal({ issueKey, trigger });
+  if (simulation.result?.action !== 'assign') return { ...simulation, executed: false };
   const accountId = simulation.result.assigneeAccountId;
   const res = await api.asUser().requestJira(route`/rest/api/3/issue/${issueKey}/assignee`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountId })
