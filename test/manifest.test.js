@@ -24,9 +24,9 @@ test('scheduled routing runs every five minutes', () => {
   assert.match(manifest, /interval:\s*fiveMinute/);
 });
 
-test('background handlers are explicitly registered', () => {
-  assert.match(manifest, /handler:\s*index\.jiraEventHandler/);
-  assert.match(manifest, /handler:\s*index\.scheduledHandler/);
+test('background handlers are routed through the QA safety gate', () => {
+  assert.match(manifest, /handler:\s*background\.jiraEventHandler/);
+  assert.match(manifest, /handler:\s*background\.scheduledHandler/);
 });
 
 test('scheduled handler has an extended but bounded timeout', () => {
