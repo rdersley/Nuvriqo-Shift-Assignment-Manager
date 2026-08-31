@@ -1,8 +1,8 @@
 import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
 import { kvs, WhereConditions } from '@forge/kvs';
-import { randomUUID } from 'node:crypto';
 import { getOnShiftMembers } from './domain/shifts.js';
+import { normaliseGroup } from './domain/shiftGroups.js';
 
 const resolver = new Resolver();
 const SHIFT_PREFIX = 'shift-group:';
@@ -26,30 +26,6 @@ async function listShiftGroups() {
     .limit(20)
     .getMany();
   return (result.results || []).map(item => item.value);
-}
-
-function normaliseSchedule(input = {}) {
-  const validDays = new Set(['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']);
-  const days = [...new Set((input.days || []).filter(day => validDays.has(day)))];
-  const start = input.start || '09:00';
-  const end = input.end || '17:00';
-  return days.map(day => ({ day, start, end }));
-}
-
-function normaliseGroup(input = {}) {
-  const id = input.id || randomUUID();
-  const memberAccountIds = [...new Set((input.memberAccountIds || []).filter(Boolean))];
-  const now = new Date().toISOString();
-  return {
-    id,
-    name: String(input.name || '').trim(),
-    timezone: input.timezone || 'Europe/Dublin',
-    enabled: input.enabled !== false,
-    memberAccountIds,
-    recurringSchedule: normaliseSchedule(input.schedule),
-    createdAt: input.createdAt || now,
-    updatedAt: now
-  };
 }
 
 async function describeUsers(accountIds = []) {
@@ -91,25 +67,23 @@ resolver.define('getDashboard', async () => {
 
 resolver.define('saveShiftGroup', async ({ payload }) => {
   await assertAdmin();
-  const group = normaliseGroup(payload?.group);
-  if (!group.name) throw new Error('Shift group name is required.');
-  if (!group.memberAccountIds.length) throw new Error('Select at least one Jira user.');
-  if (!group.recurringSchedule.length) throw new Error('Select at least one working day.');
+  const group = normaliseGroup(payload?.group || {});
   await kvs.set(`${SHIFT_PREFIX}${group.id}`, group);
   return group;
 });
 
 resolver.define('deleteShiftGroup', async ({ payload }) => {
   await assertAdmin();
-  const id = payload?.id;
+  const id = String(payload?.id || '').trim();
   if (!id) throw new Error('Shift group id is required.');
   await kvs.delete(`${SHIFT_PREFIX}${id}`);
   return { ok: true };
 });
 
-resolver.define('health', async () => {
-  await assertAdmin();
-  return { ok: true, version: '0.2.0', time: new Date().toISOString() };
-});
+resolver.define('health', async () => ({
+  ok: true,
+  version: '0.2.1',
+  time: new Date().toISOString()
+}));
 
 export const handler = resolver.getDefinitions();
