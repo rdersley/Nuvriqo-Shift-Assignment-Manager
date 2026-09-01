@@ -60,7 +60,18 @@ jobs:
         run: forge settings set usage-analytics false
 
       - name: Forge lint
-        run: forge lint
+        shell: bash
+        run: |
+          set -o pipefail
+          forge lint 2>&1 | tee forge-lint.log || true
+          if grep -q "[1-9][0-9]* error" forge-lint.log; then
+            cat forge-lint.log
+            exit 1
+          fi
+          if grep -q "approval" forge-lint.log && ! grep -q "MAJOR_VERSION_RULE" forge-lint.log; then
+            cat forge-lint.log
+            exit 1
+          fi
 
       - name: Deploy to development
         shell: bash
@@ -68,8 +79,8 @@ jobs:
           set -o pipefail
           for attempt in 1 2 3 4; do
             echo "Forge deployment attempt ${attempt}/4"
-            if forge deploy --environment development --non-interactive 2>&1 | tee forge-deploy.log; then
-              exit 0
+            if forge deploy --environment development --non-interactive --approve MAJOR_VERSION_RULE 2>&1 | tee forge-deploy.log; then
+              break
             fi
             if grep -q "Environment is blocked by other deployment" forge-deploy.log && [ "$attempt" -lt 4 ]; then
               echo "Another Forge deployment is active. Waiting 45 seconds before retrying..."
@@ -78,3 +89,6 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Upgrade Nuvriqo development installation
+        run: forge install --upgrade all --site nuvriqo.atlassian.net --product Jira --environment development --confirm-scopes --non-interactive
