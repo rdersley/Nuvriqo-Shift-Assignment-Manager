@@ -92,6 +92,3 @@ jobs:
 
       - name: Upgrade Nuvriqo development installation
         run: forge install --upgrade all --site nuvriqo.atlassian.net --product Jira --environment development --confirm-scopes --non-interactive
-
-      - name: One-time install on Retail inMotion worksite
-        run: forge install --site retailinmotion.atlassian.net --product Jira --environment development --confirm-scopes --non-interactive
