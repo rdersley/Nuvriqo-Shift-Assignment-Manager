@@ -7,6 +7,13 @@ modules:
       render: native
       title: Shift & Assignment Manager
       layout: native
+    - key: nuvriqo-shift-assignment-routing-safety
+      resource: routing-settings-ui
+      resolver:
+        function: routing-settings-resolver
+      render: native
+      title: Shift Manager Routing Safety
+      layout: native
   jira:projectPage:
     - key: nuvriqo-shift-schedule-project-page
       resource: schedule-ui
@@ -34,6 +41,8 @@ modules:
       handler: index.handler
     - key: schedule-resolver
       handler: schedule.handler
+    - key: routing-settings-resolver
+      handler: routingSettings.handler
     - key: jira-event-handler
       handler: background.jiraEventHandler
     - key: scheduled-handler
@@ -44,6 +53,8 @@ resources:
     path: src/frontend/admin.jsx
   - key: schedule-ui
     path: src/frontend/schedule.jsx
+  - key: routing-settings-ui
+    path: src/frontend/routingSettings.jsx
 permissions:
   scopes:
     - storage:app
