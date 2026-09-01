@@ -7,6 +7,14 @@ modules:
       render: native
       title: Shift & Assignment Manager
       layout: native
+  jira:projectPage:
+    - key: nuvriqo-shift-schedule-project-page
+      resource: schedule-ui
+      resolver:
+        function: schedule-resolver
+      render: native
+      title: Shift Schedule
+      layout: native
   trigger:
     - key: jira-assignment-events
       function: jira-event-handler
@@ -24,6 +32,8 @@ modules:
   function:
     - key: resolver
       handler: index.handler
+    - key: schedule-resolver
+      handler: schedule.handler
     - key: jira-event-handler
       handler: background.jiraEventHandler
     - key: scheduled-handler
@@ -31,13 +41,16 @@ modules:
       timeoutSeconds: 300
 resources:
   - key: admin-ui
-    path: src/frontend/index.jsx
+    path: src/frontend/admin.jsx
+  - key: schedule-ui
+    path: src/frontend/schedule.jsx
 permissions:
   scopes:
     - storage:app
     - read:user:jira
     - read:jira-work
     - write:jira-work
+    - read:servicedesk-request
 app:
   runtime:
     name: nodejs22.x
