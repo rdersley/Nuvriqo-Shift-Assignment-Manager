@@ -7,20 +7,14 @@ modules:
       render: native
       title: Shift & Assignment Manager
       layout: native
-    - key: nuvriqo-shift-assignment-routing-safety
+    - key: nuvriqo-shift-routing-safety
       resource: routing-settings-ui
       resolver:
-        function: routing-settings-resolver
+        function: routing-settings
       render: native
       title: Shift Manager Routing Safety
       layout: native
-    - key: nuvriqo-shift-assignment-overrides
-      resource: overrides-ui
-      resolver:
-        function: overrides-resolver
-      render: native
-      title: Shift Cover & Exceptions
-      layout: native
+      useAsConfig: true
   jira:projectPage:
     - key: nuvriqo-shift-schedule-project-page
       resource: schedule-ui
@@ -48,10 +42,8 @@ modules:
       handler: index.handler
     - key: schedule-resolver
       handler: schedule.handler
-    - key: routing-settings-resolver
+    - key: routing-settings
       handler: routingSettings.handler
-    - key: overrides-resolver
-      handler: overrides.handler
     - key: jira-event-handler
       handler: background.jiraEventHandler
     - key: scheduled-handler
@@ -64,8 +56,6 @@ resources:
     path: src/frontend/schedule.jsx
   - key: routing-settings-ui
     path: src/frontend/routingSettings.jsx
-  - key: overrides-ui
-    path: src/frontend/overrides.jsx
 permissions:
   scopes:
     - storage:app
