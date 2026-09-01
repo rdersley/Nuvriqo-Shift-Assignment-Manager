@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const manifest = await readFile(new URL('../manifest.yml', import.meta.url), 'utf8');
 const routing = await readFile(new URL('../src/routingSettings.js', import.meta.url), 'utf8');
+const routingUi = await readFile(new URL('../src/frontend/routingSettings.jsx', import.meta.url), 'utf8');
 const background = await readFile(new URL('../src/background.js', import.meta.url), 'utf8');
 const admin = await readFile(new URL('../src/frontend/admin.jsx', import.meta.url), 'utf8');
 
@@ -14,6 +15,13 @@ test('routing safety configure page is admin-only and defaults off', () => {
   assert.match(routing, /return value === true/);
   assert.match(manifest, /useAsConfig: true/);
   assert.match(manifest, /handler: routingSettings\.handler/);
+});
+
+test('enabling automatic routing requires an explicit confirmation phrase', () => {
+  assert.match(routingUi, /type ENABLE/i);
+  assert.match(routingUi, /toUpperCase\(\) !== 'ENABLE'/);
+  assert.match(routingUi, /isDisabled=\{confirm\.trim\(\)\.toUpperCase\(\) !== 'ENABLE'\}/);
+  assert.match(routingUi, /Disable automatic routing/);
 });
 
 test('background handlers consult persisted routing safety before execution', () => {
