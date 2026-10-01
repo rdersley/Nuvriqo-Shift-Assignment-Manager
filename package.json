@@ -1,6 +1,6 @@
 {
   "name": "nuvriqo-shift-assignment-manager",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "scripts": {
     "test": "node --experimental-default-type=module --test",
