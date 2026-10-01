@@ -1,22 +1,29 @@
 # Nuvriqo Shift & Assignment Manager
 
-Early Forge application foundation for shift-aware Jira Service Management assignment.
+Forge app for shift-aware Jira Service Management assignment. Admins define shift groups and assignment rules; the app routes tickets to agents who are on shift.
 
-## Current foundation
+## Modules
 
-- Time-zone aware recurring shift eligibility
-- Overnight shifts
-- Temporary include/exclude overrides
-- Deterministic rule matching and priority ordering
-- Round-robin, least-loaded, fixed-order and random assignment selectors
-- Owner-continuity protection
-- Non-destructive handling when nobody is eligible
-- Node test suite
+- **Admin page** (`src/frontend/admin.jsx`, resolver `src/index.js`): dashboard, roster, cover and absence entries, assignment rules, simulator and audit log. Every resolver checks Jira admin permission on the server.
+- **Configure page** (`src/frontend/routingSettings.jsx`, resolver `src/routingSettings.js`): the routing mode.
+- **Project page** (`src/frontend/schedule.jsx`, resolver `src/schedule.js`): a read-only Shift Schedule for all JSM users.
+- **Background** (`src/background.js`): Jira issue events and a five-minute scheduled scan. Both check the routing mode first.
 
-## V1 direction
+## Routing modes
 
-The app will maintain shift schedules and assignment rules, then use them to automatically route Jira Service Management work to eligible agents who are currently on shift. V1 includes shift-aware assignment, handover, SLA-aware routing, simulation/decision tracing and audit history.
+| Mode | Behaviour |
+| --- | --- |
+| `off` (default) | Background events and scans do nothing. |
+| `shadow` | Background routing runs against real tickets and logs each decision in the Audit Log, marked "Shadow". Jira is not changed. |
+| `on` | Background routing changes Jira assignees. The admin must type ENABLE to switch to it. |
 
-## Next implementation step
+If the setting can't be read, routing is treated as `off`. Installs that were switched on before 0.9 stay `on`.
 
-Add the Forge app identity, Jira admin Custom UI shell, KVS repositories, resolver layer and event/scheduled-trigger adapters.
+## Development
+
+```bash
+npm install
+npm run check   # syntax check, bundle every Forge entry point, run tests
+```
+
+Pushing to `main` deploys to the Forge **development** environment and upgrades the Nuvriqo test site. The retailinmotion work site runs the same development environment, so a push to `main` updates it too. Pull requests only run the checks.

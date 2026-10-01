@@ -48,3 +48,24 @@ export function normaliseGroup(input = {}, now = new Date()) {
     updatedAt: stamp
   };
 }
+
+// Cover/absence entries come from the admin UI; keep only well-formed ones for current members.
+export function normaliseOverrides(input, memberAccountIds = []) {
+  if (!Array.isArray(input)) return [];
+  return input.flatMap(raw => {
+    const accountId = String(raw?.accountId || '').trim();
+    const startAt = new Date(raw?.startAt);
+    const endAt = new Date(raw?.endAt);
+    if (!accountId || !memberAccountIds.includes(accountId)) return [];
+    if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime()) || endAt <= startAt) return [];
+    return [{
+      id: String(raw.id || makeId()),
+      accountId,
+      displayName: String(raw.displayName || accountId),
+      type: raw.type === 'exclude' ? 'exclude' : 'include',
+      startAt: startAt.toISOString(),
+      endAt: endAt.toISOString(),
+      createdAt: raw.createdAt || new Date().toISOString()
+    }];
+  });
+}

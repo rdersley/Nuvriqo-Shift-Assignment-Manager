@@ -10,12 +10,28 @@ function valueAt(issue, field) {
   return issue.fields?.[field];
 }
 
+// Custom fields arrive as raw Jira values: select options are { value }, users { accountId },
+// cascades { value, child }, multi-selects arrays. Reduce them to the strings an admin can type.
+function comparableValues(actual) {
+  if (actual == null) return [];
+  if (Array.isArray(actual)) return actual.flatMap(comparableValues);
+  if (typeof actual !== 'object') return [String(actual)];
+  const own = ['value', 'name', 'displayName', 'accountId', 'key', 'id'].map(k => actual[k]).filter(v => v != null).map(String);
+  return actual.child ? [...own, ...comparableValues(actual.child)] : own;
+}
+
+function valueEquals(actual, expected) {
+  if (expected == null) return actual == null;
+  const wanted = String(expected).trim().toLowerCase();
+  return comparableValues(actual).some(v => v.trim().toLowerCase() === wanted);
+}
+
 function conditionMatches(condition, issue) {
   const actual = valueAt(issue, condition.field);
   switch (condition.operator) {
-    case 'equals': return actual === condition.value;
-    case 'notEquals': return actual !== condition.value;
-    case 'in': return condition.values?.includes(actual) ?? false;
+    case 'equals': return valueEquals(actual, condition.value);
+    case 'notEquals': return !valueEquals(actual, condition.value);
+    case 'in': return (condition.values || []).some(value => valueEquals(actual, value));
     case 'contains': return Array.isArray(actual) && actual.includes(condition.value);
     case 'empty': return actual == null || actual === '';
     case 'notEmpty': return !(actual == null || actual === '');

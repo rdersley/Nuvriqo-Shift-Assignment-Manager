@@ -10,9 +10,9 @@ const admin = await readFile(new URL('../src/frontend/admin.jsx', import.meta.ur
 
 test('routing safety configure page is admin-only and defaults off', () => {
   assert.match(routing, /getRoutingSettings/);
-  assert.match(routing, /setAutomaticRouting/);
+  assert.match(routing, /setRoutingMode/);
   assert.match(routing, /await assertAdmin\(\)/);
-  assert.match(routing, /return value === true/);
+  assert.match(routing, /resolveRoutingMode\(stored, legacy\)/);
   assert.match(manifest, /useAsConfig: true/);
   assert.match(manifest, /handler: routingSettings\.handler/);
 });
@@ -25,9 +25,14 @@ test('enabling automatic routing requires an explicit confirmation phrase', () =
 });
 
 test('background handlers consult persisted routing safety before execution', () => {
-  assert.match(background, /getAutomaticRoutingEnabled/);
+  assert.match(background, /getRoutingMode/);
   assert.match(background, /failing closed/);
-  assert.equal((background.match(/await automaticRoutingEnabled\(\)/g) || []).length, 2);
+  assert.equal((background.match(/await currentRoutingMode\(\)/g) || []).length, 2);
+});
+
+test('shadow mode is offered without the ENABLE phrase but live mode still needs it', () => {
+  assert.match(routingUi, /changeMode\('shadow'\)/);
+  assert.match(routingUi, /next === 'on' && confirm\.trim\(\)\.toUpperCase\(\) !== 'ENABLE'/);
 });
 
 test('cover and absence controls are consolidated into the main admin UI', () => {
