@@ -49,7 +49,8 @@ function App() {
     <Heading size="medium">Current teams</Heading>
     {loading && !data ? <Spinner size="medium" /> : data?.groups?.map(group => <Box key={group.id} xcss={cardXcss}><Stack space="space.100">
       <Inline spread="space-between"><Heading size="small">{group.name}</Heading><Text>{group.timezone}</Text></Inline>
-      <Text>{hoursSummary(group.recurringSchedule)}</Text>
+      {group.recurringSchedule?.length > 0 && <Text>{hoursSummary(group.recurringSchedule)}</Text>}
+      {group.members?.filter(user => user.personalSchedule?.length).map(user => <Text key={`hours-${user.accountId}`}>{user.displayName}: {hoursSummary(user.personalSchedule)}</Text>)}
       <Inline space="space.100"><Text as="strong">On shift:</Text>{group.onShift?.length ? group.onShift.map(user => <Badge key={user.accountId}>{user.displayName}</Badge>) : <Lozenge appearance="moved">Nobody</Lozenge>}</Inline>
       <Inline space="space.100"><Text as="strong">Team:</Text>{group.members?.map(user => <Badge key={user.accountId}>{user.displayName}</Badge>)}</Inline>
     </Stack></Box>)}

@@ -53,7 +53,13 @@ export function isMemberOnShift({ shiftGroup, accountId, at = new Date(), overri
   if (activeOverrides.some(o => o.type === 'include')) return true;
 
   const { day, minuteOfDay } = localParts(at, shiftGroup.timezone || 'UTC');
-  return (shiftGroup.recurringSchedule || []).some(s => scheduleMatches(s, day, minuteOfDay));
+  return scheduleForMember(shiftGroup, accountId).some(s => scheduleMatches(s, day, minuteOfDay));
+}
+
+// A member's own hours, when set, replace the group's hours for that member.
+export function scheduleForMember(shiftGroup, accountId) {
+  const personal = shiftGroup?.memberSchedules?.[accountId];
+  return personal?.length ? personal : (shiftGroup?.recurringSchedule || []);
 }
 
 export function getOnShiftMembers({ shiftGroup, at = new Date(), overrides = [] }) {
