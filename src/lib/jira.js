@@ -27,6 +27,26 @@ export async function searchIssueKeys(jql, actor = 'app', max = 100) {
   return keys;
 }
 
+// Full issues (chosen fields, optionally with changelog) via the enhanced JQL search.
+export async function searchIssues(jql, { fields = [], expand, max = 1000, actor = 'user' } = {}) {
+  const issues = [];
+  let nextPageToken;
+  let truncated = false;
+  do {
+    const res = await jiraClient(actor).requestJira(route`/rest/api/3/search/jql`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ jql, fields, maxResults: Math.min(100, max - issues.length), ...(expand ? { expand } : {}), ...(nextPageToken ? { nextPageToken } : {}) })
+    });
+    if (!res.ok) throw new Error(`Unable to search Jira (${res.status})`);
+    const body = await res.json();
+    issues.push(...(body.issues || []));
+    nextPageToken = body.isLast === false ? body.nextPageToken : undefined;
+    if (nextPageToken && issues.length >= max) truncated = true;
+  } while (nextPageToken && issues.length < max);
+  return { issues, truncated };
+}
+
 export async function countIssues(jql, actor = 'user') {
   const res = await jiraClient(actor).requestJira(route`/rest/api/3/search/approximate-count`, {
     method: 'POST',

@@ -48,6 +48,19 @@ export function todayKey(timeZone, now = new Date()) {
   return wallClock(now, timeZone).dateKey;
 }
 
+// Shift bands by start time, for grouping and colour in the rota.
+export const SHIFT_BANDS = [
+  { key: 'early', label: 'Early', from: 4 * 60, to: 8 * 60 },
+  { key: 'day', label: 'Day', from: 8 * 60, to: 12 * 60 },
+  { key: 'late', label: 'Late', from: 12 * 60, to: 20 * 60 },
+  { key: 'night', label: 'Night', from: 20 * 60, to: 28 * 60 }
+];
+export function shiftBand(startMinute) {
+  if (startMinute == null || startMinute >= 9999) return 'off';
+  const m = startMinute < 4 * 60 ? startMinute + 24 * 60 : startMinute;
+  return SHIFT_BANDS.find(b => m >= b.from && m < b.to)?.key || 'night';
+}
+
 const hhmm = wc => `${String(wc.hour).padStart(2, '0')}:${String(wc.minute).padStart(2, '0')}`;
 
 function dayLabel(dateKey) {
@@ -73,7 +86,7 @@ function runsOf(counts, times, stepMs, test) {
   return out;
 }
 
-export function buildRoster({ groups = [], startDate, days = 7, displayTimeZone = 'Europe/Dublin', minCoverage = 2, stepMinutes = 5, now = new Date() }) {
+export function buildRoster({ groups = [], startDate, days = 7, displayTimeZone = 'Europe/Dublin', minCoverage = 2, stepMinutes = 5, now = new Date(), includeSeries = false }) {
   const stepMs = stepMinutes * 60_000;
   const start = zonedMidnight(startDate, displayTimeZone);
   const end = zonedMidnight(addDays(startDate, days), displayTimeZone);
@@ -136,16 +149,22 @@ export function buildRoster({ groups = [], startDate, days = 7, displayTimeZone 
       const startedBefore = run.from < start && run.to > start;
       const key = startedBefore ? startKey : from.dateKey;
       if (!cells[key]) continue;
-      cells[key].shifts.push({ start: hhmm(from), end: run.open ? '…' : hhmm(to), kind: run.scheduled ? 'shift' : 'cover', continued: startedBefore, overnight: !run.open && !startedBefore && to.dateKey !== from.dateKey });
+      cells[key].shifts.push({ start: hhmm(from), end: run.open ? '…' : hhmm(to), kind: run.scheduled ? 'shift' : 'cover', band: shiftBand(from.hour * 60 + from.minute), continued: startedBefore, overnight: !run.open && !startedBefore && to.dateKey !== from.dateKey });
     }
     for (const gap of row.absences) {
       const from = wallClock(gap.from, displayTimeZone);
       const key = gap.from < start && gap.to > start ? startKey : from.dateKey;
       if (cells[key]) cells[key].absent.push({ start: hhmm(from), end: hhmm(wallClock(gap.to, displayTimeZone)) });
     }
-    const firstStart = row.runs.find(r => r.to > start)?.from;
-    const sortMinute = firstStart ? (wc => wc.hour * 60 + wc.minute)(wallClock(firstStart, displayTimeZone)) : 9999;
-    return { key: row.key, accountId: row.accountId, displayName: row.displayName, role: row.role, groupId: row.group.id, groupName: row.group.name, hours: Math.round(minutesWorked / 6) / 10, sortMinute, cells };
+    // The person's usual shift in this range: the most common start and end time.
+    const starts = new Map();
+    for (const cell of Object.values(cells)) for (const shift of cell.shifts) if (!shift.continued && shift.kind === 'shift') {
+      const id = `${shift.start}–${shift.end}`;
+      starts.set(id, (starts.get(id) || 0) + 1);
+    }
+    const usual = [...starts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || null;
+    const sortMinute = usual ? Number(usual.slice(0, 2)) * 60 + Number(usual.slice(3, 5)) : 9999;
+    return { key: row.key, accountId: row.accountId, displayName: row.displayName, role: row.role, groupId: row.group.id, groupName: row.group.name, hours: Math.round(minutesWorked / 6) / 10, usualShift: usual, band: shiftBand(sortMinute), sortMinute, cells };
   }).sort((a, b) => a.groupName.localeCompare(b.groupName) || a.sortMinute - b.sortMinute || a.displayName.localeCompare(b.displayName));
 
   // --- Coverage --------------------------------------------------------------------------------
@@ -181,6 +200,8 @@ export function buildRoster({ groups = [], startDate, days = 7, displayTimeZone 
     coverage: {
       minCoverage,
       stepMinutes,
+      // Headcount at each step, for the workload analysis.
+      series: includeSeries ? times.map((at, i) => ({ at: at.getTime(), count: counts[i] })) : undefined,
       heat,
       byHour: hourTotals.map((h, hour) => ({ hour: `${String(hour).padStart(2, '0')}:00`, average: h.n ? Math.round((h.sum / h.n) * 10) / 10 : 0, minimum: h.n ? h.min : 0 })),
       gaps,
