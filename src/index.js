@@ -17,6 +17,7 @@ import { assertAdmin } from './lib/admin.js';
 import { listByPrefix } from './lib/kvsList.js';
 import { countIssues, getIssue, jiraClient, quoteJql, searchIssueKeys } from './lib/jira.js';
 import { getRoutingMode } from './routingSettings.js';
+import { MIN_COVERAGE_KEY, loadRoster } from './lib/rosterService.js';
 import { APP_VERSION } from './version.js';
 
 const resolver = new Resolver();
@@ -52,7 +53,7 @@ async function describeUsers(accountIds = [], storedProfiles = []) {
 
 function memberProfilesFromPayload(group = {}) {
   return [...new Map((group.memberProfiles || []).filter(p => p?.accountId).map(p => [p.accountId, {
-    accountId: String(p.accountId), displayName: String(p.displayName || p.accountId)
+    accountId: String(p.accountId), displayName: String(p.displayName || p.accountId), ...(p.role ? { role: String(p.role).trim() } : {})
   }])).values()];
 }
 
@@ -280,21 +281,15 @@ resolver.define('getDashboard', async () => {
 
 resolver.define('getRoster', async ({ payload }) => {
   await assertAdmin();
-  const startAt = new Date(payload?.startAt || Date.now());
-  if (Number.isNaN(startAt.getTime())) throw new Error('Invalid roster start date.');
-  const days = Math.min(Math.max(Number(payload?.days || 7), 1), 31);
-  const groups = await listShiftGroups();
-  const slots = [];
-  for (let d = 0; d < days; d += 1) {
-    for (const hour of [0, 6, 9, 12, 15, 18, 21]) {
-      const at = new Date(startAt);
-      at.setUTCDate(startAt.getUTCDate() + d);
-      at.setUTCHours(hour, 0, 0, 0);
-      const people = groups.flatMap(group => enrichGroup(group, at).onShift.map(user => ({ ...user, groupId: group.id, groupName: group.name })));
-      slots.push({ at: at.toISOString(), people });
-    }
-  }
-  return { startAt: startAt.toISOString(), days, slots };
+  return loadRoster(payload || {});
+});
+
+resolver.define('setMinCoverage', async ({ payload }) => {
+  await assertAdmin();
+  const value = Number(payload?.minCoverage);
+  if (!Number.isInteger(value) || value < 1 || value > 50) throw new Error('Minimum coverage must be a whole number from 1 to 50.');
+  await kvs.set(MIN_COVERAGE_KEY, value);
+  return { minCoverage: value };
 });
 
 resolver.define('saveShiftGroup', async ({ payload }) => {
@@ -400,7 +395,7 @@ resolver.define('importRota', async ({ payload }) => {
   const memberSchedules = { ...(existing?.memberSchedules || {}) };
   for (const person of people) memberSchedules[person.accountId] = person.schedule;
   const profiles = new Map((existing?.memberProfiles || []).map(p => [p.accountId, p]));
-  for (const person of people) profiles.set(person.accountId, { accountId: String(person.accountId), displayName: String(person.displayName || person.accountId) });
+  for (const person of people) profiles.set(person.accountId, { accountId: String(person.accountId), displayName: String(person.displayName || person.accountId), ...(person.role ? { role: String(person.role).trim() } : {}) });
 
   const group = normaliseGroup({
     ...(existing || {}),
