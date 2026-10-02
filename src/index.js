@@ -18,6 +18,7 @@ import { listByPrefix } from './lib/kvsList.js';
 import { countIssues, getIssue, jiraClient, quoteJql, searchIssueKeys } from './lib/jira.js';
 import { getRoutingMode } from './routingSettings.js';
 import { MIN_COVERAGE_KEY, loadRoster } from './lib/rosterService.js';
+import { loadWorkload } from './lib/workloadService.js';
 import { APP_VERSION } from './version.js';
 
 const resolver = new Resolver();
@@ -282,6 +283,12 @@ resolver.define('getDashboard', async () => {
 resolver.define('getRoster', async ({ payload }) => {
   await assertAdmin();
   return loadRoster(payload || {});
+});
+
+// Admin only: shows per-agent figures. Reads Jira as the signed-in admin and never writes.
+resolver.define('getWorkloadAnalysis', async ({ payload }) => {
+  await assertAdmin();
+  return loadWorkload(payload || {});
 });
 
 resolver.define('setMinCoverage', async ({ payload }) => {

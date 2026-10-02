@@ -24,13 +24,30 @@ function Stat({ title, value, detail }) {
   return <Box xcss={tile}><Stack space="space.050"><Text size="small">{title}</Text><Heading size="medium">{value}</Heading>{detail && <Text size="small">{detail}</Text>}</Stack></Box>;
 }
 
-function ShiftCell({ cell }) {
-  if (!cell || (!cell.shifts.length && !cell.absent.length)) return <Text color="color.text.subtlest">—</Text>;
+// Shift bands (by start time) share one colour across the rota, legend and headings.
+const BANDS = [
+  { key: 'early', label: 'Early', appearance: 'inprogress' },
+  { key: 'day', label: 'Day', appearance: 'success' },
+  { key: 'late', label: 'Late', appearance: 'moved' },
+  { key: 'night', label: 'Night', appearance: 'new' },
+  { key: 'off', label: 'No shifts', appearance: 'default' }
+];
+const bandOf = key => BANDS.find(b => b.key === key) || BANDS[4];
+const card = { borderWidth: 'border.width', borderStyle: 'solid', borderColor: 'color.border', borderRadius: 'border.radius', padding: 'space.200', backgroundColor: 'elevation.surface' };
+
+function ShiftCell({ cell, singleDay }) {
+  // In a multi-day view a shift running from the night before is already shown on that day.
+  const shifts = (cell?.shifts || []).filter(s => singleDay || !s.continued);
+  if (!shifts.length && !cell?.absent?.length) return <Text color="color.text.subtlest">Off</Text>;
   return <Stack space="space.050">
-    {cell.shifts.map((s, i) => s.kind === 'cover'
-      ? <Lozenge key={i} appearance="new">{`Cover ${s.start}–${s.end}`}</Lozenge>
-      : <Text key={i}>{s.continued ? `until ${s.end}` : `${s.start}–${s.end}${s.overnight ? ' +1' : ''}`}</Text>)}
-    {cell.absent.map((a, i) => <Tooltip key={`a${i}`} content={`Absent ${a.start}–${a.end}`}><Lozenge appearance="removed">Absent</Lozenge></Tooltip>)}
+    {shifts.map((s, i) => {
+      const text = s.continued ? `until ${s.end}` : `${s.start}–${s.end}`;
+      const tip = s.overnight ? `${s.start} to ${s.end} the next day` : s.continued ? `Started the day before, ends ${s.end}` : `${s.start} to ${s.end}`;
+      return <Tooltip key={i} content={s.kind === 'cover' ? `Cover shift: ${tip}` : tip}>
+        {s.kind === 'cover' ? <Lozenge appearance="new" isBold>{`Cover ${text}`}</Lozenge> : <Lozenge appearance={bandOf(s.band).appearance}>{text}</Lozenge>}
+      </Tooltip>;
+    })}
+    {cell.absent.map((a, i) => <Tooltip key={`a${i}`} content={`Absent ${a.start}–${a.end}`}><Lozenge appearance="removed" isBold>Absent</Lozenge></Tooltip>)}
   </Stack>;
 }
 
@@ -86,21 +103,38 @@ export default function RosterView({ resolverName, canEditMinimum = false, refre
   const groupOptions = [ALL, ...(data?.groupOptions || [])];
   const title = data ? (data.days === 1 ? data.dates[0]?.label : `${data.dates[0]?.label} – ${data.dates[data.dates.length - 1]?.label}`) : '';
 
+  const singleDay = data?.days === 1;
   const rotaHead = data && {
     cells: [
-      { key: 'person', content: 'Person' },
-      ...data.dates.map(d => ({ key: d.date, content: d.date === data.today ? `${d.label} · Today` : d.label })),
-      { key: 'hours', content: 'Hours' }
+      { key: 'person', content: 'Person', width: 22 },
+      ...data.dates.map(d => ({ key: d.date, content: d.date === data.today ? `${d.label} (today)` : d.label })),
+      { key: 'hours', content: 'Hours', width: 7 }
     ]
   };
-  const rotaRows = (data?.people || []).map(p => ({
-    key: p.key,
-    cells: [
-      { key: 'person', content: <Stack space="space.0"><Text as="strong">{p.displayName}</Text><Text size="small">{[p.role, (data.groupOptions?.length || 0) > 1 ? p.groupName : ''].filter(Boolean).join(' · ') || ' '}</Text></Stack> },
-      ...data.dates.map(d => ({ key: d.date, content: <ShiftCell cell={p.cells[d.date]} /> })),
-      { key: 'hours', content: <Text>{`${p.hours}h`}</Text> }
-    ]
-  }));
+  const multiGroup = (data?.groupOptions?.length || 0) > 1;
+  const bandSections = BANDS.map(band => {
+    const people = (data?.people || []).filter(p => (p.band || 'off') === band.key);
+    if (!people.length) return null;
+    const usual = [...new Set(people.map(p => p.usualShift).filter(Boolean))];
+    const counts = data.dates.map(d => people.filter(p => (p.cells[d.date]?.shifts || []).some(s => singleDay || !s.continued)).length);
+    const rows = people.map(p => ({
+      key: p.key,
+      cells: [
+        { key: 'person', content: <Stack space="space.0"><Text weight="medium">{p.displayName}</Text>{(p.role || multiGroup) && <Text size="small" color="color.text.subtle">{[p.role, multiGroup ? p.groupName : ''].filter(Boolean).join(' · ')}</Text>}</Stack> },
+        ...data.dates.map(d => ({ key: d.date, content: <ShiftCell cell={p.cells[d.date]} singleDay={singleDay} /> })),
+        { key: 'hours', content: <Text>{`${p.hours}h`}</Text> }
+      ]
+    }));
+    rows.push({
+      key: `${band.key}-total`,
+      cells: [
+        { key: 'person', content: <Text weight="bold">On shift</Text> },
+        ...data.dates.map((d, i) => ({ key: d.date, content: <Text weight="bold">{String(counts[i])}</Text> })),
+        { key: 'hours', content: <Text weight="bold">{`${Math.round(people.reduce((sum, p) => sum + p.hours, 0))}h`}</Text> }
+      ]
+    });
+    return { band, people, usual, rows };
+  }).filter(Boolean);
 
   const heatHead = { cells: [{ key: 'day', content: 'Day' }, ...Array.from({ length: 24 }, (_, h) => ({ key: `h${h}`, content: String(h).padStart(2, '0') }))] };
   const heatRows = (coverage?.heat || []).map(day => ({
@@ -115,35 +149,53 @@ export default function RosterView({ resolverName, canEditMinimum = false, refre
   }));
 
   return <Stack space="space.200">
-    <Inline spread="space-between" alignBlock="center" shouldWrap>
-      <Stack space="space.050"><Heading size="medium">{title || 'Roster & coverage'}</Heading>{data && <Text size="small">{`Times in ${zoneLabel}`}</Text>}</Stack>
-      <Inline space="space.100" alignBlock="center" shouldWrap>
-        <ButtonGroup>{RANGES.map(r => <Button key={r.days} appearance={days === r.days ? 'primary' : 'default'} onClick={() => load({ days: r.days, startDate: null })}>{r.label}</Button>)}</ButtonGroup>
-        <ButtonGroup>
-          <Button onClick={() => startDate && load({ startDate: addDays(startDate, -days) })}>Previous</Button>
-          <Button onClick={() => load({ startDate: null })}>Today</Button>
-          <Button onClick={() => startDate && load({ startDate: addDays(startDate, days) })}>Next</Button>
-        </ButtonGroup>
+    <Box xcss={card}><Stack space="space.150">
+      <Inline spread="space-between" alignBlock="center" shouldWrap>
+        <Stack space="space.050">
+          <Heading size="medium">{title || 'Roster & coverage'}</Heading>
+          {data && <Text size="small" color="color.text.subtle">{`${data.people.length} ${data.people.length === 1 ? 'person' : 'people'} · times in ${zoneLabel}`}</Text>}
+        </Stack>
+        <Inline space="space.100" alignBlock="center" shouldWrap>
+          <ButtonGroup>{RANGES.map(r => <Button key={r.days} appearance={days === r.days ? 'primary' : 'default'} onClick={() => load({ days: r.days, startDate: null })}>{r.label}</Button>)}</ButtonGroup>
+          <ButtonGroup>
+            <Button iconBefore="chevron-left" onClick={() => startDate && load({ startDate: addDays(startDate, -days) })}>Previous</Button>
+            <Button onClick={() => load({ startDate: null })}>Today</Button>
+            <Button iconAfter="chevron-right" onClick={() => startDate && load({ startDate: addDays(startDate, days) })}>Next</Button>
+          </ButtonGroup>
+        </Inline>
       </Inline>
-    </Inline>
-    <Inline space="space.200" shouldWrap>
-      <Box xcss={{ minWidth: '220px' }}><Label labelFor="roster-group">Shift group</Label><Select id="roster-group" options={groupOptions} value={groupOptions.find(o => o.value === groupId) || ALL} onChange={o => load({ groupId: o?.value || '' })} /></Box>
-      <Box xcss={{ minWidth: '180px' }}><Label labelFor="roster-zone">Show times in</Label><Select id="roster-zone" options={data?.zoneOptions || []} value={(data?.zoneOptions || []).find(o => o.value === zone)} onChange={o => load({ displayTimeZone: o.value })} /></Box>
-    </Inline>
+      <Inline space="space.200" alignBlock="end" shouldWrap>
+        <Box xcss={{ minWidth: '240px' }}><Label labelFor="roster-group">Shift group</Label><Select id="roster-group" options={groupOptions} value={groupOptions.find(o => o.value === groupId) || ALL} onChange={o => load({ groupId: o?.value || '' })} /></Box>
+        <Box xcss={{ minWidth: '180px' }}><Label labelFor="roster-zone">Show times in</Label><Select id="roster-zone" options={data?.zoneOptions || []} value={(data?.zoneOptions || []).find(o => o.value === zone)} onChange={o => load({ displayTimeZone: o.value })} /></Box>
+        {loading && data && <Spinner size="small" label="Loading" />}
+      </Inline>
+    </Stack></Box>
     {error && <SectionMessage appearance="error"><Text>{error}</Text></SectionMessage>}
     {loading && !data && <Spinner size="large" />}
 
     {data && <Tabs id="roster-tabs">
       <TabList><Tab>Rota</Tab><Tab>Coverage</Tab></TabList>
       <TabPanel><Box xcss={{ paddingTop: 'space.200' }}>
-        {loading && <Spinner size="small" />}
         {!data.people.length && <SectionMessage appearance="information"><Text>No shift groups to show yet.</Text></SectionMessage>}
         {data.people.length > 0 && data.days > 7 && <SectionMessage appearance="information"><Text>Choose Day or Week to see each person's shifts. The Coverage tab covers all four weeks.</Text></SectionMessage>}
-        {data.people.length > 0 && data.days <= 7 && <Box xcss={{ overflowX: 'auto' }}><DynamicTable head={rotaHead} rows={rotaRows} /></Box>}
-        {data.people.length > 0 && data.days <= 7 && <Text size="small">"+1" ends the next day · "until" started the day before · Cover and Absent come from Cover & Exceptions.</Text>}
+        {data.people.length > 0 && data.days <= 7 && <Stack space="space.200">
+          <Inline space="space.100" alignBlock="center" shouldWrap>
+            <Text size="small" color="color.text.subtle">Shift:</Text>
+            {BANDS.slice(0, 4).map(b => <Lozenge key={b.key} appearance={b.appearance}>{b.label}</Lozenge>)}
+            <Lozenge appearance="new" isBold>Cover</Lozenge>
+            <Lozenge appearance="removed" isBold>Absent</Lozenge>
+            <Text size="small" color="color.text.subtle">· Hover a shift for its exact times. Night shifts end the next morning.</Text>
+          </Inline>
+          {bandSections.map(section => <Box key={section.band.key} xcss={card}><Stack space="space.150">
+            <Inline spread="space-between" alignBlock="center" shouldWrap>
+              <Inline space="space.100" alignBlock="center"><Lozenge appearance={section.band.appearance} isBold>{section.band.label}</Lozenge><Heading size="small">{section.band.key === 'off' ? 'No shifts in this period' : `${section.band.label} shift`}</Heading></Inline>
+              <Text size="small" color="color.text.subtle">{`${section.people.length} ${section.people.length === 1 ? 'person' : 'people'}${section.usual.length ? ` · usually ${section.usual.join(', ')}` : ''}`}</Text>
+            </Inline>
+            <Box xcss={{ overflowX: 'auto' }}><DynamicTable head={rotaHead} rows={section.rows} /></Box>
+          </Stack></Box>)}
+        </Stack>}
       </Box></TabPanel>
       <TabPanel><Box xcss={{ paddingTop: 'space.200' }}><Stack space="space.200">
-        {loading && <Spinner size="small" />}
         <Inline space="space.150" shouldWrap>
           <Stat title="Lowest" value={`${stats.lowest} on shift`} detail={stats.lowestAt} />
           <Stat title="Peak" value={`${stats.peak} on shift`} detail={stats.peakAt} />
@@ -153,12 +205,12 @@ export default function RosterView({ resolverName, canEditMinimum = false, refre
           <Stat title="Agent hours" value={`${stats.agentHours}h`} detail="scheduled in range" />
         </Inline>
         {canEditMinimum
-          ? <Inline space="space.100" alignBlock="center"><Label labelFor="roster-min">Minimum agents on shift</Label><Box xcss={{ width: '90px' }}><Select id="roster-min" options={MIN_OPTIONS} value={MIN_OPTIONS.find(o => o.value === min)} onChange={changeMinimum} /></Box></Inline>
-          : <Text size="small">{`Target: at least ${min} agent(s) on shift at all times.`}</Text>}
+          ? <Inline space="space.100" alignBlock="center"><Label labelFor="roster-min">Minimum agents on shift</Label><Box xcss={{ width: '90px' }}><Select id="roster-min" options={MIN_OPTIONS} value={MIN_OPTIONS.find(o => o.value === min)} onChange={changeMinimum} /></Box><Text size="small" color="color.text.subtle">Used for the amber warnings below.</Text></Inline>
+          : <Text size="small" color="color.text.subtle">{`Target: at least ${min} agent(s) on shift at all times.`}</Text>}
         <RangeList title="Nobody on shift" appearance="error" items={coverage.gaps} />
         <RangeList title={`Fewer than ${min} on shift`} appearance="warning" items={coverage.low} />
         {!coverage.gaps.length && !coverage.low.length && <SectionMessage appearance="success"><Text>{`At least ${min} agent(s) are on shift for the whole period.`}</Text></SectionMessage>}
-        <BarChart data={coverage.byHour} xAccessor="hour" yAccessor="average" title={data.days === 1 ? 'Agents on shift by hour' : 'Average agents on shift by hour of day'} subtitle={`Times in ${zoneLabel}`} height={280} />
+        <Box xcss={card}><BarChart data={coverage.byHour} xAccessor="hour" yAccessor="average" title={data.days === 1 ? 'Agents on shift by hour' : 'Average agents on shift by hour of day'} subtitle={`Times in ${zoneLabel}`} height={280} showBorder={false} /></Box>
         <Heading size="small">Hour by hour</Heading>
         <Text size="small">Each cell is the fewest agents on shift during that hour. Red: nobody · amber: below minimum · green: minimum met.</Text>
         <Box xcss={{ overflowX: 'auto' }}><DynamicTable head={heatHead} rows={heatRows} /></Box>

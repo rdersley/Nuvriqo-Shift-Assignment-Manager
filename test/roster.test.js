@@ -119,3 +119,21 @@ test('minimum coverage setting is admin-only', () => {
   assert.ok(start > 0);
   assert.ok(backend.slice(start, start + 120).includes('await assertAdmin()'));
 });
+
+test('people are put into early, day, late and night bands by their usual start', async () => {
+  const { shiftBand } = await import('../src/domain/roster.js');
+  assert.deepEqual(['06:45', '09:15', '14:45', '22:45', '02:00'].map(t => shiftBand(Number(t.slice(0, 2)) * 60 + Number(t.slice(3)))), ['early', 'day', 'late', 'night', 'night']);
+  const r = buildRoster({ groups: [team({ schedules: { a: days(weekdays, '22:45', '07:45'), b: days(['mon', 'tue'], '06:45', '15:45').concat(days(['wed'], '09:00', '17:00')) } })], startDate: WEEK, days: 7 });
+  const byId = Object.fromEntries(r.people.map(p => [p.accountId, p]));
+  assert.equal(byId.a.band, 'night');
+  assert.equal(byId.a.usualShift, '22:45–07:45');
+  assert.equal(byId.b.usualShift, '06:45–15:45');
+  assert.equal(byId.b.cells['2026-10-07'].shifts[0].band, 'day');
+});
+
+test('the workload tab is admin-only in the UI', async () => {
+  const admin = await readFile(new URL('../src/frontend/admin.jsx', import.meta.url), 'utf8');
+  const page = await readFile(new URL('../src/frontend/schedule.jsx', import.meta.url), 'utf8');
+  assert.ok(admin.includes('<WorkloadAnalysis'));
+  assert.ok(!page.includes('WorkloadAnalysis'));
+});
