@@ -182,3 +182,18 @@ test('each kind is capped, with a pointer to the rest', () => {
   assert.equal(result.recommendations.filter(r => r.kind === 'unstaffed').length, 5);
   assert.ok(result.recommendations.some(r => r.kind === 'more' && /uncovered window/.test(r.title)));
 });
+
+test('created and resolved are both profiled by hour of day', () => {
+  const issues = [];
+  for (let d = 0; d < 7; d += 1) {
+    // Two created at 09:00 each day, resolved at 14:00.
+    for (let k = 0; k < 2; k += 1) issues.push(ticket(MON + (d * 24 + 9) * H + k * 60_000, { resolvedAt: MON + (d * 24 + 14) * H, statusCategory: 'done' }));
+  }
+  const result = analyseWorkload({ issues, staffing: staffing(() => 2), period, now });
+  const at = hour => result.byHourOfDay.find(h => h.hour === hour);
+  assert.equal(at('09:00').ticketsPerDay, 2);
+  assert.equal(at('09:00').resolvedPerDay, 0);
+  assert.equal(at('14:00').resolvedPerDay, 2);
+  assert.deepEqual([result.flow.peakCreatedHour, result.flow.peakResolvedHour], ['09:00', '14:00']);
+  assert.deepEqual(result.flow.buildingHours, ['09:00']);
+});
