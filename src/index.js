@@ -7,7 +7,9 @@ import { matchingRules, ruleMatches } from './engine/rules.js';
 import { decideForRule } from './engine/assignment.js';
 import { cooldownMinutesForRule, deriveEventTriggers, diffShiftState, executionIsCoolingDown } from './engine/triggers.js';
 import { toIssueModel } from './engine/issueModel.js';
-import { AUDIT_PREFIX, LEGACY_AUDIT_PREFIX, auditKey, newestFirst } from './engine/audit.js';
+import { AUDIT_PREFIX, LEGACY_AUDIT_PREFIX, RETENTION_OPTIONS, auditKey, newestFirst, normaliseRetentionDays } from './engine/audit.js';
+import { AUDIT_RETENTION_KEY, getAuditRetentionDays } from './housekeeping.js';
+import { setWithTtl } from './lib/kvsTtl.js';
 import { assertAdmin } from './lib/admin.js';
 import { listByPrefix } from './lib/kvsList.js';
 import { countIssues, getIssue, jiraClient, quoteJql, searchIssueKeys } from './lib/jira.js';
@@ -84,7 +86,15 @@ async function countOpenAssigned(accountIds = [], rule = {}, actor = 'user') {
 async function audit(entry) {
   const now = new Date();
   const key = auditKey(now);
-  await kvs.set(key, { id: key.slice(AUDIT_PREFIX.length), createdAt: now.toISOString(), ...entry });
+  let retentionDays = 90;
+  try { retentionDays = await getAuditRetentionDays(); } catch { /* default */ }
+  await setWithTtl(key, { id: key.slice(AUDIT_PREFIX.length), createdAt: now.toISOString(), ...entry }, retentionDays);
+}
+
+// Cooldown markers only matter for the cooldown window; let KVS expire them a day after it ends.
+function markerTtlDays(rule, dryRun) {
+  const minutes = dryRun ? Math.max(SHADOW_COOLDOWN_MINUTES, cooldownMinutesForRule(rule)) : cooldownMinutesForRule(rule);
+  return Math.ceil(minutes / 1440) + 1;
 }
 
 // Everything a rule needs that doesn't depend on the individual issue. Built once per rule so a
@@ -147,7 +157,7 @@ async function executeDecision(simulation, ctx, { actor = 'user', source = 'manu
 
   if (!['assign', 'unassign'].includes(result.action)) {
     if (respectCooldown && result.reason === 'NO_ELIGIBLE_AGENT') {
-      await kvs.set(ruleExecutionKey, now.toISOString());
+      await setWithTtl(ruleExecutionKey, now.toISOString(), markerTtlDays(rule, dryRun));
       await audit({ ...baseEntry, action: 'none', assigneeAccountId: null, assigneeName: null });
     }
     return { ...simulation, executed: false };
@@ -168,7 +178,8 @@ async function executeDecision(simulation, ctx, { actor = 'user', source = 'manu
     ctx.lastAssignedAccountId = accountId;
     ctx.loads[accountId] = (ctx.loads[accountId] || 0) + 1;
   }
-  await Promise.all([kvs.set(ruleExecutionKey, now.toISOString()), kvs.set(issueExecutionKey, now.toISOString())]);
+  const ttlDays = markerTtlDays(rule, dryRun);
+  await Promise.all([setWithTtl(ruleExecutionKey, now.toISOString(), ttlDays), setWithTtl(issueExecutionKey, now.toISOString(), ttlDays)]);
   await audit({ ...baseEntry, action: result.action, assigneeAccountId: accountId, assigneeName: simulation.proposedAssignee?.displayName || null });
   return { ...simulation, executed: !dryRun, shadow: dryRun };
 }
@@ -288,7 +299,10 @@ resolver.define('saveShiftGroup', async ({ payload }) => {
   const raw = payload?.group || {};
   const group = normaliseGroup(raw);
   group.memberProfiles = memberProfilesFromPayload(raw);
-  group.overrides = normaliseOverrides(raw.overrides, group.memberAccountIds);
+  // Cover/absence entries have their own resolvers; keep what's stored so an edit form opened
+  // before a cover was added can't drop it.
+  const existing = raw.id ? await kvs.get(`${SHIFT_PREFIX}${group.id}`) : null;
+  group.overrides = normaliseOverrides(existing ? existing.overrides : raw.overrides, group.memberAccountIds);
   await kvs.set(`${SHIFT_PREFIX}${group.id}`, group);
   return group;
 });
@@ -301,6 +315,33 @@ resolver.define('setShiftGroupEnabled', async ({ payload }) => {
   const updated = { ...existing, enabled: payload?.enabled !== false, updatedAt: new Date().toISOString() };
   await kvs.set(`${SHIFT_PREFIX}${id}`, updated);
   return updated;
+});
+
+// Cover/absence entries are changed on their own so a save can't overwrite the group's hours or members.
+resolver.define('saveShiftOverride', async ({ payload }) => {
+  await assertAdmin();
+  const groupId = String(payload?.groupId || '').trim();
+  const key = `${SHIFT_PREFIX}${groupId}`;
+  const group = groupId ? await kvs.get(key) : null;
+  if (!group) throw new Error('Shift group not found.');
+  const accountId = String(payload?.accountId || '').trim();
+  if (!(group.memberAccountIds || []).includes(accountId)) throw new Error('Selected user is not a member of this shift group.');
+  const profile = (group.memberProfiles || []).find(p => p.accountId === accountId);
+  const [override] = normaliseOverrides([{ accountId, displayName: profile?.displayName, type: payload?.type, startAt: payload?.startAt, endAt: payload?.endAt }], group.memberAccountIds);
+  if (!override) throw new Error('Enter a valid start and end time.');
+  await kvs.set(key, { ...group, overrides: [...(group.overrides || []), override], updatedAt: new Date().toISOString() });
+  return override;
+});
+
+resolver.define('deleteShiftOverride', async ({ payload }) => {
+  await assertAdmin();
+  const groupId = String(payload?.groupId || '').trim();
+  const overrideId = String(payload?.overrideId || '').trim();
+  const key = `${SHIFT_PREFIX}${groupId}`;
+  const group = groupId ? await kvs.get(key) : null;
+  if (!group || !overrideId) throw new Error('Shift group and override are required.');
+  await kvs.set(key, { ...group, overrides: (group.overrides || []).filter(o => o.id !== overrideId), updatedAt: new Date().toISOString() });
+  return { ok: true };
 });
 
 resolver.define('deleteShiftGroup', async ({ payload }) => {
@@ -386,6 +427,18 @@ resolver.define('getAuditLog', async () => {
   // Legacy entries were stored oldest-first, so they have to be read in full before sorting.
   const legacy = await listByPrefix(LEGACY_AUDIT_PREFIX, 1000);
   return newestFirst([...recent, ...legacy], 100);
+});
+
+resolver.define('getAuditSettings', async () => {
+  await assertAdmin();
+  return { retentionDays: await getAuditRetentionDays(), options: RETENTION_OPTIONS };
+});
+
+resolver.define('setAuditRetention', async ({ payload }) => {
+  await assertAdmin();
+  const retentionDays = normaliseRetentionDays(payload?.retentionDays);
+  await kvs.set(AUDIT_RETENTION_KEY, retentionDays);
+  return { retentionDays, options: RETENTION_OPTIONS };
 });
 
 resolver.define('health', async () => ({ ok: true, version: APP_VERSION, time: new Date().toISOString() }));

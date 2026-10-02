@@ -4,6 +4,13 @@ import { invoke } from '@forge/bridge';
 
 const cardXcss = { borderWidth: 'border.width', borderStyle: 'solid', borderColor: 'color.border', borderRadius: 'border.radius', padding: 'space.200' };
 
+function hoursSummary(schedule = []) {
+  if (!schedule.length) return 'No working days';
+  const same = schedule.every(s => s.start === schedule[0].start && s.end === schedule[0].end);
+  if (same) return `${schedule.map(s => s.day.toUpperCase()).join(', ')} · ${schedule[0].start}–${schedule[0].end}`;
+  return schedule.map(s => `${s.day.toUpperCase()} ${s.start}–${s.end}`).join(' · ');
+}
+
 function App() {
   const [days, setDays] = useState(7);
   const [data, setData] = useState(null);
@@ -42,6 +49,7 @@ function App() {
     <Heading size="medium">Current teams</Heading>
     {loading && !data ? <Spinner size="medium" /> : data?.groups?.map(group => <Box key={group.id} xcss={cardXcss}><Stack space="space.100">
       <Inline spread="space-between"><Heading size="small">{group.name}</Heading><Text>{group.timezone}</Text></Inline>
+      <Text>{hoursSummary(group.recurringSchedule)}</Text>
       <Inline space="space.100"><Text as="strong">On shift:</Text>{group.onShift?.length ? group.onShift.map(user => <Badge key={user.accountId}>{user.displayName}</Badge>) : <Lozenge appearance="moved">Nobody</Lozenge>}</Inline>
       <Inline space="space.100"><Text as="strong">Team:</Text>{group.members?.map(user => <Badge key={user.accountId}>{user.displayName}</Badge>)}</Inline>
     </Stack></Box>)}

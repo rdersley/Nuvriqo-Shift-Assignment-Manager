@@ -12,3 +12,19 @@ export function auditKey(now = new Date(), suffix = Math.random().toString(36).s
 export function newestFirst(entries = [], limit = 100) {
   return [...entries].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, limit);
 }
+
+export const RETENTION_OPTIONS = [30, 90, 180, 365];
+export const DEFAULT_RETENTION_DAYS = 90;
+
+export function normaliseRetentionDays(value) {
+  const days = Number(value);
+  return RETENTION_OPTIONS.includes(days) ? days : DEFAULT_RETENTION_DAYS;
+}
+
+// Key ranges that hold only entries older than `cutoff`, for both key layouts.
+export function expiredAuditRanges(cutoff) {
+  return [
+    { from: `${AUDIT_PREFIX}${String(MAX_TIME - cutoff.getTime() + 1).padStart(13, '0')}`, to: `${AUDIT_PREFIX}~` },
+    { from: LEGACY_AUDIT_PREFIX, to: `${LEGACY_AUDIT_PREFIX}${cutoff.toISOString()}` }
+  ];
+}

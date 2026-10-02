@@ -12,7 +12,31 @@ export function normaliseSchedule(input = {}) {
   const end = String(input.end || '17:00');
   if (!TIME_RE.test(start)) throw new Error('Start time must be HH:mm.');
   if (!TIME_RE.test(end)) throw new Error('End time must be HH:mm.');
-  return days.map(day => ({ day, start, end }));
+  return normaliseEntries(days.map(day => ({ day, start, end })));
+}
+
+const DAY_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+const DAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
+
+// Per-day working windows, e.g. Mon–Thu 09:00–17:00 and Fri 09:00–13:00. An end earlier than the start
+// is an overnight shift. A day may have more than one window (a split shift).
+export function normaliseEntries(entries = []) {
+  const seen = new Set();
+  const result = [];
+  for (const entry of entries) {
+    const day = String(entry?.day || '');
+    if (!VALID_DAYS.has(day)) continue;
+    const start = String(entry.start || '');
+    const end = String(entry.end || '');
+    if (!TIME_RE.test(start)) throw new Error(`${DAY_NAMES[day]}: start time must be HH:mm.`);
+    if (!TIME_RE.test(end)) throw new Error(`${DAY_NAMES[day]}: end time must be HH:mm.`);
+    if (start === end) throw new Error(`${DAY_NAMES[day]}: start and end time can't be the same.`);
+    const id = `${day}|${start}|${end}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    result.push({ day, start, end });
+  }
+  return result.sort((a, b) => DAY_ORDER.indexOf(a.day) - DAY_ORDER.indexOf(b.day) || a.start.localeCompare(b.start));
 }
 
 export function normaliseGroup(input = {}, now = new Date()) {
@@ -21,11 +45,8 @@ export function normaliseGroup(input = {}, now = new Date()) {
   const stamp = now.toISOString();
   const name = String(input.name || '').trim();
   const timezone = String(input.timezone || 'Europe/Dublin').trim();
-  const recurringSchedule = normaliseSchedule(input.schedule || {
-    days: (input.recurringSchedule || []).map(item => item.day),
-    start: input.recurringSchedule?.[0]?.start,
-    end: input.recurringSchedule?.[0]?.end
-  });
+  // `schedule` is the "same hours every day" shape; `recurringSchedule` carries per-day hours.
+  const recurringSchedule = input.schedule ? normaliseSchedule(input.schedule) : normaliseEntries(input.recurringSchedule || []);
 
   if (!name) throw new Error('Shift group name is required.');
   if (!memberAccountIds.length) throw new Error('Select at least one Jira user.');

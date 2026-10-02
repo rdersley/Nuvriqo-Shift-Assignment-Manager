@@ -1,5 +1,6 @@
 import { jiraEventHandler as coreJiraEventHandler, scheduledHandler as coreScheduledHandler } from './index.js';
 import { getRoutingMode } from './routingSettings.js';
+import { runHousekeeping } from './housekeeping.js';
 
 async function currentRoutingMode() {
   try {
@@ -20,6 +21,8 @@ export async function jiraEventHandler(event, context) {
 }
 
 export async function scheduledHandler(request, context) {
+  // Storage clean-up runs even when routing is off; it never touches Jira.
+  try { await runHousekeeping(); } catch (error) { console.error('Housekeeping failed.', error); }
   const mode = await currentRoutingMode();
   if (mode === 'off') {
     console.log('Shift & Assignment Manager automatic routing is OFF; scheduled evaluation skipped.');
