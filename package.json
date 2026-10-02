@@ -1,12 +1,13 @@
 {
   "name": "nuvriqo-shift-assignment-manager",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "scripts": {
-    "test": "node --experimental-default-type=module --test",
+    "test": "node --test",
     "build": "echo 'UI Kit resources are bundled by Forge'",
-    "lint:domain": "node --experimental-default-type=module --check src/domain/shifts.js && node --experimental-default-type=module --check src/domain/shiftGroups.js && node --experimental-default-type=module --check src/engine/rules.js && node --experimental-default-type=module --check src/engine/assignment.js && node --experimental-default-type=module --check src/engine/triggers.js && node --experimental-default-type=module --check src/background.js && node --experimental-default-type=module --check src/routingSettings.js && node --experimental-default-type=module --check src/overrides.js && node --experimental-default-type=module --check src/schedule.js && node --experimental-default-type=module --check src/index.js",
-    "check": "npm run lint:domain && npm test"
+    "lint:domain": "node --check src/domain/shifts.js && node --check src/domain/shiftGroups.js && node --check src/engine/rules.js && node --check src/engine/assignment.js && node --check src/engine/triggers.js && node --check src/engine/issueModel.js && node --check src/engine/routingMode.js && node --check src/engine/audit.js && node --check src/lib/admin.js && node --check src/lib/kvsList.js && node --check src/lib/jira.js && node --check src/version.js && node --check src/lib/kvsTtl.js && node --check src/housekeeping.js && node --check src/background.js && node --check src/routingSettings.js && node --check src/schedule.js && node --check src/index.js",
+    "check": "npm run lint:domain && npm run check:bundles && npm test",
+    "check:bundles": "node scripts/check-bundles.mjs"
   },
   "dependencies": {
     "@forge/api": "^5.0.0",
@@ -15,5 +16,8 @@
     "@forge/react": "^11.0.0",
     "@forge/resolver": "^1.7.0",
     "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
   }
 }

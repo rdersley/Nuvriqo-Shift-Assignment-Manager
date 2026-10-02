@@ -50,3 +50,18 @@ export function executionIsCoolingDown({ lastExecutedAt, now = new Date(), coold
   if (Number.isNaN(last.getTime())) return false;
   return now.getTime() - last.getTime() < Math.max(0, Number(cooldownMinutes || 0)) * 60_000;
 }
+
+// Compare the stored on-shift snapshot with the current one. A missing or stale snapshot (e.g. routing
+// was off for days) is only a baseline: acting on it would treat everyone who changed since as a shift
+// boundary and mass-reassign tickets.
+export function diffShiftState({ previous, current = [], now = new Date(), maxAgeMinutes = 15 }) {
+  const at = new Date(previous?.at);
+  if (!Array.isArray(previous?.onShift) || Number.isNaN(at.getTime()) || now.getTime() - at.getTime() > maxAgeMinutes * 60_000) {
+    return { baseline: true, started: [], ended: [] };
+  }
+  return {
+    baseline: false,
+    started: current.filter(id => !previous.onShift.includes(id)),
+    ended: previous.onShift.filter(id => !current.includes(id))
+  };
+}

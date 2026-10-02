@@ -1,13 +1,12 @@
 import Resolver from '@forge/resolver';
-import { kvs, WhereConditions } from '@forge/kvs';
 import { getOnShiftMembers } from './domain/shifts.js';
+import { listByPrefix } from './lib/kvsList.js';
 
 const resolver = new Resolver();
 const SHIFT_PREFIX = 'shift-group:';
 
 async function listShiftGroups() {
-  const result = await kvs.query().where('key', WhereConditions.beginsWith(SHIFT_PREFIX)).limit(100).getMany();
-  return (result.results || []).map(item => item.value).filter(group => group?.enabled !== false);
+  return (await listByPrefix(SHIFT_PREFIX)).filter(group => group?.enabled !== false);
 }
 
 function profileMap(group) {

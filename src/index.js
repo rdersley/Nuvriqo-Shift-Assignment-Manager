@@ -1,37 +1,37 @@
 import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
-import { kvs, WhereConditions } from '@forge/kvs';
+import { kvs } from '@forge/kvs';
 import { getOnShiftMembers } from './domain/shifts.js';
-import { normaliseGroup } from './domain/shiftGroups.js';
+import { normaliseGroup, normaliseOverrides } from './domain/shiftGroups.js';
 import { matchingRules, ruleMatches } from './engine/rules.js';
-import { evaluateAssignment } from './engine/assignment.js';
-import { cooldownMinutesForRule, deriveEventTriggers, executionIsCoolingDown } from './engine/triggers.js';
+import { decideForRule } from './engine/assignment.js';
+import { cooldownMinutesForRule, deriveEventTriggers, diffShiftState, executionIsCoolingDown } from './engine/triggers.js';
+import { toIssueModel } from './engine/issueModel.js';
+import { AUDIT_PREFIX, LEGACY_AUDIT_PREFIX, RETENTION_OPTIONS, auditKey, newestFirst, normaliseRetentionDays } from './engine/audit.js';
+import { AUDIT_RETENTION_KEY, getAuditRetentionDays } from './housekeeping.js';
+import { setWithTtl } from './lib/kvsTtl.js';
+import { assertAdmin } from './lib/admin.js';
+import { listByPrefix } from './lib/kvsList.js';
+import { countIssues, getIssue, jiraClient, quoteJql, searchIssueKeys } from './lib/jira.js';
+import { getRoutingMode } from './routingSettings.js';
+import { APP_VERSION } from './version.js';
 
 const resolver = new Resolver();
 const SHIFT_PREFIX = 'shift-group:';
 const RULE_PREFIX = 'assignment-rule:';
-const AUDIT_PREFIX = 'assignment-audit:';
 const ROTATION_PREFIX = 'rotation:';
 const EXECUTION_PREFIX = 'execution:';
 const SHIFT_STATE_PREFIX = 'shift-state:';
+// Shadow mode keeps its own rotation and cooldown state so it never disturbs live routing.
+const SHADOW_PREFIX = 'shadow-';
+// Upper bound on tickets one rule may touch in a single five-minute scheduled run.
+const MAX_ISSUES_PER_RULE_SCAN = 50;
+const SHADOW_COOLDOWN_MINUTES = 24 * 60;
 
-function jiraClient(actor = 'user') {
-  return actor === 'app' ? api.asApp() : api.asUser();
-}
+const byPriority = (a, b) => (a.priority ?? 1000) - (b.priority ?? 1000);
 
-async function assertAdmin() {
-  const response = await api.asUser().requestJira(route`/rest/api/3/mypermissions?permissions=ADMINISTER`);
-  if (!response.ok) throw new Error(`Unable to verify Jira admin permission (${response.status})`);
-  const body = await response.json();
-  if (!body?.permissions?.ADMINISTER?.havePermission) throw new Error('Jira administrator permission is required.');
-}
-
-async function listByPrefix(prefix, limit = 100) {
-  const result = await kvs.query().where('key', WhereConditions.beginsWith(prefix)).limit(limit).getMany();
-  return (result.results || []).map(item => item.value);
-}
-
-async function listShiftGroups() { return listByPrefix(SHIFT_PREFIX, 100); }
+async function listShiftGroups() { return listByPrefix(SHIFT_PREFIX); }
+async function listRules() { return listByPrefix(RULE_PREFIX); }
 
 async function describeUsers(accountIds = [], storedProfiles = []) {
   const stored = Object.fromEntries((storedProfiles || []).filter(p => p?.accountId).map(p => [p.accountId, p.displayName || p.accountId]));
@@ -64,164 +64,146 @@ function enrichGroup(group, at = new Date()) {
   };
 }
 
-function toIssueModel(issue) {
-  const fields = issue?.fields || {};
-  return {
-    key: issue?.key,
-    projectId: String(fields.project?.id || ''),
-    issueTypeId: String(fields.issuetype?.id || ''),
-    requestTypeId: String(fields.customfield_10010?.requestType?.id || fields.customfield_10010 || ''),
-    statusId: String(fields.status?.id || ''),
-    priorityId: String(fields.priority?.id || ''),
-    assigneeAccountId: fields.assignee?.accountId || null,
-    reporterAccountId: fields.reporter?.accountId || null,
-    labels: fields.labels || [],
-    componentIds: (fields.components || []).map(c => String(c.id)),
-    fields
-  };
+function profileNames(groups = []) {
+  return Object.fromEntries(groups.flatMap(g => g.memberProfiles || []).map(p => [p.accountId, p.displayName]));
 }
 
-async function getIssue(issueKey, actor = 'user') {
-  const res = await jiraClient(actor).requestJira(route`/rest/api/3/issue/${issueKey}`);
-  if (!res.ok) throw new Error(`Unable to load ${issueKey} (${res.status})`);
-  return res.json();
+function projectJql(rule = {}) {
+  // Project ids are numeric; anything else is dropped rather than spliced into JQL.
+  const ids = (rule.projectIds || []).map(String).filter(id => /^\d+$/.test(id));
+  return ids.length ? `project in (${ids.join(',')}) AND ` : '';
 }
 
-async function searchIssues(jql, actor = 'app', maxResults = 50) {
-  const res = await jiraClient(actor).requestJira(route`/rest/api/3/search?jql=${jql}&maxResults=${maxResults}&fields=key`);
-  if (!res.ok) throw new Error(`Unable to search Jira (${res.status})`);
-  const body = await res.json();
-  return body.issues || [];
-}
-
-async function countOpenAssigned(accountIds = [], projectIds = [], actor = 'user') {
+async function countOpenAssigned(accountIds = [], rule = {}, actor = 'user') {
   const entries = await Promise.all(accountIds.map(async accountId => {
     try {
-      const projectClause = projectIds.length ? ` AND project in (${projectIds.join(',')})` : '';
-      const jql = `assignee = "${accountId}" AND statusCategory != Done${projectClause}`;
-      const res = await jiraClient(actor).requestJira(route`/rest/api/3/search?jql=${jql}&maxResults=0`);
-      if (!res.ok) return [accountId, 0];
-      const body = await res.json();
-      return [accountId, body.total || 0];
+      return [accountId, await countIssues(`${projectJql(rule)}assignee = ${quoteJql(accountId)} AND statusCategory != Done`, actor)];
     } catch { return [accountId, 0]; }
   }));
   return Object.fromEntries(entries);
 }
 
 async function audit(entry) {
-  const createdAt = new Date().toISOString();
-  const id = `${createdAt}:${Math.random().toString(36).slice(2)}`;
-  await kvs.set(`${AUDIT_PREFIX}${id}`, { id, createdAt, ...entry });
+  const now = new Date();
+  const key = auditKey(now);
+  let retentionDays = 90;
+  try { retentionDays = await getAuditRetentionDays(); } catch { /* default */ }
+  await setWithTtl(key, { id: key.slice(AUDIT_PREFIX.length), createdAt: now.toISOString(), ...entry }, retentionDays);
 }
 
-function profileNames(groups = []) {
-  return Object.fromEntries(groups.flatMap(g => g.memberProfiles || []).map(p => [p.accountId, p.displayName]));
+// Cooldown markers only matter for the cooldown window; let KVS expire them a day after it ends.
+function markerTtlDays(rule, dryRun) {
+  const minutes = dryRun ? Math.max(SHADOW_COOLDOWN_MINUTES, cooldownMinutesForRule(rule)) : cooldownMinutesForRule(rule);
+  return Math.ceil(minutes / 1440) + 1;
 }
 
-async function evaluateRule({ rule, jiraIssue, actor = 'user' }) {
-  const issue = toIssueModel(jiraIssue);
-  const groups = (await listShiftGroups()).filter(g => (rule.shiftGroupIds || []).includes(g.id));
+// Everything a rule needs that doesn't depend on the individual issue. Built once per rule so a
+// scheduled scan of 50 tickets doesn't repeat the roster and workload lookups 50 times.
+async function buildRuleContext({ rule, groups, actor, dryRun = false }) {
+  const ruleGroups = groups.filter(g => (rule.shiftGroupIds || []).includes(g.id));
   const at = new Date();
-  const eligible = [...new Set(groups.flatMap(g => getOnShiftMembers({ shiftGroup: g, at, overrides: g.overrides || [] })))];
-  const loads = await countOpenAssigned(eligible, rule.projectIds || [], actor);
-  const lastAssignedAccountId = await kvs.get(`${ROTATION_PREFIX}${rule.id}`);
+  const eligible = [...new Set(ruleGroups.flatMap(g => getOnShiftMembers({ shiftGroup: g, at, overrides: g.overrides || [] })))];
+  const rotationKey = `${dryRun ? SHADOW_PREFIX : ''}${ROTATION_PREFIX}${rule.id}`;
+  const [loads, lastAssignedAccountId] = await Promise.all([
+    // Workload is only needed to pick (least loaded) or to show in the simulator.
+    rule.assignmentStrategy === 'leastLoaded' || actor === 'user' ? countOpenAssigned(eligible, rule, actor) : {},
+    kvs.get(rotationKey)
+  ]);
+  return { rule, eligible, loads, lastAssignedAccountId, rotationKey, names: profileNames(ruleGroups), dryRun };
+}
 
-  let result;
-  if (rule.trigger === 'shiftEnd' && rule.shiftEndPolicy === 'keep') {
-    result = { action: 'keep', assigneeAccountId: issue.assigneeAccountId, reason: 'SHIFT_END_KEEP' };
-  } else if (rule.trigger === 'shiftEnd' && rule.shiftEndPolicy === 'unassign') {
-    result = issue.assigneeAccountId
-      ? { action: 'unassign', reason: 'SHIFT_END_UNASSIGN' }
-      : { action: 'none', reason: 'ALREADY_UNASSIGNED' };
-  } else {
-    result = evaluateAssignment({ rule, issue, eligibleAccountIds: eligible, loads, lastAssignedAccountId });
-    if (result.action === 'none' && result.reason === 'NO_ELIGIBLE_AGENT' && rule.noAgentPolicy === 'unassign' && issue.assigneeAccountId) {
-      result = { action: 'unassign', reason: 'NO_ELIGIBLE_AGENT_UNASSIGN' };
-    }
-  }
-
-  const names = profileNames(groups);
+function decide(ctx, jiraIssue, trigger) {
+  const issue = toIssueModel(jiraIssue);
+  const result = decideForRule({ rule: ctx.rule, issue, eligibleAccountIds: ctx.eligible, loads: ctx.loads, lastAssignedAccountId: ctx.lastAssignedAccountId });
+  const name = id => (id ? ctx.names[id] || id : null);
   return {
     issueKey: issue.key,
-    matchedRule: rule,
+    trigger,
+    matchedRule: ctx.rule,
+    currentAssignee: issue.assigneeAccountId ? { accountId: issue.assigneeAccountId, displayName: name(issue.assigneeAccountId) } : null,
+    proposedAssignee: result.action === 'assign' ? { accountId: result.assigneeAccountId, displayName: name(result.assigneeAccountId) } : null,
     result,
-    eligible: eligible.map(accountId => ({ accountId, displayName: names[accountId] || accountId, load: loads[accountId] || 0 }))
+    eligible: ctx.eligible.map(accountId => ({ accountId, displayName: name(accountId), load: ctx.loads[accountId] || 0 }))
   };
 }
 
-async function simulateInternal({ issueKey, trigger = 'issueCreated', actor = 'user' }) {
-  const jiraIssue = await getIssue(issueKey, actor);
-  const issue = toIssueModel(jiraIssue);
-  const rules = await listByPrefix(RULE_PREFIX, 100);
-  const matched = matchingRules({ rules, trigger, issue });
-  if (!matched.length) return { issueKey, trigger, matchedRule: null, result: { action: 'none', reason: 'NO_MATCHING_RULE' }, eligible: [] };
-  return { trigger, ...(await evaluateRule({ rule: matched[0], jiraIssue, actor })) };
-}
-
-async function simulateTriggersInternal({ issueKey, triggers = [], actor = 'app' }) {
-  const jiraIssue = await getIssue(issueKey, actor);
-  const issue = toIssueModel(jiraIssue);
-  const rules = await listByPrefix(RULE_PREFIX, 100);
-  const candidates = rules
-    .filter(rule => triggers.includes(rule.trigger) && ruleMatches({ rule, trigger: rule.trigger, issue }))
-    .sort((a, b) => (a.priority ?? 1000) - (b.priority ?? 1000));
-  if (!candidates.length) return { issueKey, triggers, matchedRule: null, result: { action: 'none', reason: 'NO_MATCHING_RULE' }, eligible: [] };
-  return { triggers, ...(await evaluateRule({ rule: candidates[0], jiraIssue, actor })) };
-}
-
-async function executeSimulation(simulation, { actor = 'user', source = 'manual-execute', respectCooldown = false } = {}) {
+async function executeDecision(simulation, ctx, { actor = 'user', source = 'manual-execute', respectCooldown = false } = {}) {
   const rule = simulation.matchedRule;
   if (!rule) return { ...simulation, executed: false };
 
+  const dryRun = ctx.dryRun === true;
   const issueKey = simulation.issueKey;
   const now = new Date();
-  const ruleExecutionKey = `${EXECUTION_PREFIX}${rule.id}:${issueKey}`;
-  const issueExecutionKey = `${EXECUTION_PREFIX}issue:${issueKey}`;
+  const statePrefix = `${dryRun ? SHADOW_PREFIX : ''}${EXECUTION_PREFIX}`;
+  const ruleExecutionKey = `${statePrefix}${rule.id}:${issueKey}`;
+  const issueExecutionKey = `${statePrefix}issue:${issueKey}`;
   if (respectCooldown) {
     const [lastRuleRun, lastIssueRun] = await Promise.all([kvs.get(ruleExecutionKey), kvs.get(issueExecutionKey)]);
-    const cooldown = cooldownMinutesForRule(rule);
+    // Shadow mode never changes the ticket, so the same stale ticket would match again on every scan;
+    // log each rule/ticket pair at most once a day.
+    const cooldown = dryRun ? Math.max(SHADOW_COOLDOWN_MINUTES, cooldownMinutesForRule(rule)) : cooldownMinutesForRule(rule);
     if (executionIsCoolingDown({ lastExecutedAt: lastRuleRun, now, cooldownMinutes: cooldown }) || executionIsCoolingDown({ lastExecutedAt: lastIssueRun, now, cooldownMinutes: 2 })) {
       return { ...simulation, executed: false, skipped: true, skipReason: 'COOLDOWN' };
     }
   }
 
   const result = simulation.result || {};
+  const auditSource = dryRun ? `shadow:${source}` : source;
+  const baseEntry = {
+    issueKey, ruleId: rule.id, ruleName: rule.name, trigger: simulation.trigger, reason: result.reason, source: auditSource, dryRun,
+    previousAssigneeAccountId: simulation.currentAssignee?.accountId || null,
+    previousAssigneeName: simulation.currentAssignee?.displayName || null
+  };
+
   if (!['assign', 'unassign'].includes(result.action)) {
     if (respectCooldown && result.reason === 'NO_ELIGIBLE_AGENT') {
-      await kvs.set(ruleExecutionKey, now.toISOString());
-      await audit({ issueKey, ruleId: rule.id, ruleName: rule.name, action: 'none', assigneeAccountId: null, reason: result.reason, source });
+      await setWithTtl(ruleExecutionKey, now.toISOString(), markerTtlDays(rule, dryRun));
+      await audit({ ...baseEntry, action: 'none', assigneeAccountId: null, assigneeName: null });
     }
     return { ...simulation, executed: false };
   }
 
   const accountId = result.action === 'assign' ? result.assigneeAccountId : null;
-  const res = await jiraClient(actor).requestJira(route`/rest/api/3/issue/${issueKey}/assignee`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'X-Atlassian-Webhook-Trace': `nuvriqo-shift-${rule.id}` },
-    body: JSON.stringify({ accountId })
-  });
-  if (!res.ok) throw new Error(`Unable to update assignee for ${issueKey} (${res.status})`);
+  if (!dryRun) {
+    const res = await jiraClient(actor).requestJira(route`/rest/api/3/issue/${issueKey}/assignee`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Atlassian-Webhook-Trace': `nuvriqo-shift-${rule.id}` },
+      body: JSON.stringify({ accountId })
+    });
+    if (!res.ok) throw new Error(`Unable to update assignee for ${issueKey} (${res.status})`);
+  }
 
-  if (accountId) await kvs.set(`${ROTATION_PREFIX}${rule.id}`, accountId);
-  await Promise.all([kvs.set(ruleExecutionKey, now.toISOString()), kvs.set(issueExecutionKey, now.toISOString())]);
-  await audit({ issueKey, ruleId: rule.id, ruleName: rule.name, action: result.action, assigneeAccountId: accountId, reason: result.reason, source });
-  return { ...simulation, executed: true };
+  if (accountId) {
+    await kvs.set(ctx.rotationKey, accountId);
+    ctx.lastAssignedAccountId = accountId;
+    ctx.loads[accountId] = (ctx.loads[accountId] || 0) + 1;
+  }
+  const ttlDays = markerTtlDays(rule, dryRun);
+  await Promise.all([setWithTtl(ruleExecutionKey, now.toISOString(), ttlDays), setWithTtl(issueExecutionKey, now.toISOString(), ttlDays)]);
+  await audit({ ...baseEntry, action: result.action, assigneeAccountId: accountId, assigneeName: simulation.proposedAssignee?.displayName || null });
+  return { ...simulation, executed: !dryRun, shadow: dryRun };
 }
 
-function projectJql(rule = {}) {
-  return rule.projectIds?.length ? `project in (${rule.projectIds.join(',')}) AND ` : '';
+async function simulateInternal({ issueKey, trigger = 'issueCreated', actor = 'user' }) {
+  const jiraIssue = await getIssue(issueKey, actor);
+  const issue = toIssueModel(jiraIssue);
+  const matched = matchingRules({ rules: await listRules(), trigger, issue });
+  if (!matched.length) return { simulation: { issueKey: issue.key || issueKey, trigger, matchedRule: null, result: { action: 'none', reason: 'NO_MATCHING_RULE' }, eligible: [] } };
+  const ctx = await buildRuleContext({ rule: matched[0], groups: await listShiftGroups(), actor });
+  return { simulation: decide(ctx, jiraIssue, trigger), ctx };
 }
 
-function quoteJqlField(value = '') {
-  return `"${String(value).replaceAll('"', '\\"')}"`;
+async function routeIssue({ rule, issueKey, trigger, groups, ctxByRule, source, dryRun }) {
+  const jiraIssue = await getIssue(issueKey, 'app');
+  if (!ruleMatches({ rule, trigger, issue: toIssueModel(jiraIssue) })) return;
+  if (!ctxByRule.has(rule.id)) ctxByRule.set(rule.id, await buildRuleContext({ rule, groups, actor: 'app', dryRun }));
+  const ctx = ctxByRule.get(rule.id);
+  await executeDecision(decide(ctx, jiraIssue, trigger), ctx, { actor: 'app', source, respectCooldown: true });
 }
 
-async function scanTemporalRules() {
-  const rules = (await listByPrefix(RULE_PREFIX, 100))
-    .filter(rule => rule.enabled && ['untouched', 'slaThreshold'].includes(rule.trigger))
-    .sort((a, b) => (a.priority ?? 1000) - (b.priority ?? 1000));
-
-  for (const rule of rules) {
+async function scanTemporalRules({ rules, groups, dryRun }) {
+  const ctxByRule = new Map();
+  for (const rule of rules.filter(r => r.enabled && ['untouched', 'slaThreshold'].includes(r.trigger)).sort(byPriority)) {
     let jql;
     if (rule.trigger === 'untouched') {
       const minutes = Math.max(5, Number(rule.untouchedMinutes || 60));
@@ -229,59 +211,45 @@ async function scanTemporalRules() {
     } else {
       if (!rule.slaFieldName) continue;
       const minutes = Math.max(1, Number(rule.slaThresholdMinutes || 30));
-      const field = quoteJqlField(rule.slaFieldName);
+      const field = quoteJql(rule.slaFieldName);
       jql = `${projectJql(rule)}statusCategory != Done AND ${field} < remaining("${minutes}m") AND ${field} >= remaining("0m")`;
     }
-
-    const issues = await searchIssues(jql, 'app', 50);
-    for (const item of issues) {
-      const jiraIssue = await getIssue(item.key, 'app');
-      const issue = toIssueModel(jiraIssue);
-      if (!ruleMatches({ rule, trigger: rule.trigger, issue })) continue;
-      const simulation = { trigger: rule.trigger, ...(await evaluateRule({ rule, jiraIssue, actor: 'app' })) };
-      await executeSimulation(simulation, { actor: 'app', source: `scheduled:${rule.trigger}`, respectCooldown: true });
+    try {
+      for (const key of await searchIssueKeys(jql, 'app', MAX_ISSUES_PER_RULE_SCAN)) {
+        await routeIssue({ rule, issueKey: key, trigger: rule.trigger, groups, ctxByRule, source: `scheduled:${rule.trigger}`, dryRun });
+      }
+    } catch (error) {
+      // One bad rule (e.g. an SLA field that no longer exists) must not stop the others.
+      console.error(`Scheduled scan failed for rule ${rule.id}`, error);
     }
   }
 }
 
-async function scanShiftTransitions() {
+async function scanShiftTransitions({ rules, groups, dryRun }) {
   const now = new Date();
-  const groups = await listShiftGroups();
-  const rules = (await listByPrefix(RULE_PREFIX, 100)).filter(r => r.enabled && ['shiftStart', 'shiftEnd'].includes(r.trigger));
+  const boundaryRules = rules.filter(r => r.enabled && ['shiftStart', 'shiftEnd'].includes(r.trigger)).sort(byPriority);
+  const ctxByRule = new Map();
 
   for (const group of groups) {
     const current = getOnShiftMembers({ shiftGroup: group, at: now, overrides: group.overrides || [] });
     const stateKey = `${SHIFT_STATE_PREFIX}${group.id}`;
-    const previousState = await kvs.get(stateKey);
+    const previous = await kvs.get(stateKey);
     await kvs.set(stateKey, { at: now.toISOString(), onShift: current });
-    if (!previousState?.onShift) continue;
+    const { baseline, started, ended } = diffShiftState({ previous, current, now });
+    if (baseline) continue;
 
-    const previous = previousState.onShift || [];
-    const started = current.filter(id => !previous.includes(id));
-    const ended = previous.filter(id => !current.includes(id));
+    const forGroup = trigger => boundaryRules.filter(r => r.trigger === trigger && (r.shiftGroupIds || []).includes(group.id));
+    const work = [];
+    if (ended.length) for (const rule of forGroup('shiftEnd')) work.push({ rule, jql: `${projectJql(rule)}statusCategory != Done AND assignee in (${ended.map(quoteJql).join(',')})` });
+    if (started.length) for (const rule of forGroup('shiftStart')) work.push({ rule, jql: `${projectJql(rule)}statusCategory != Done AND assignee is EMPTY` });
 
-    if (ended.length) {
-      const relevant = rules.filter(r => r.trigger === 'shiftEnd' && (r.shiftGroupIds || []).includes(group.id)).sort((a, b) => (a.priority ?? 1000) - (b.priority ?? 1000));
-      for (const rule of relevant) {
-        const assignees = ended.map(id => `"${id}"`).join(',');
-        const jql = `${projectJql(rule)}statusCategory != Done AND assignee in (${assignees})`;
-        const issues = await searchIssues(jql, 'app', 50);
-        for (const item of issues) {
-          const simulation = await simulateInternal({ issueKey: item.key, trigger: 'shiftEnd', actor: 'app' });
-          await executeSimulation(simulation, { actor: 'app', source: 'scheduled:shiftEnd', respectCooldown: true });
+    for (const { rule, jql } of work) {
+      try {
+        for (const key of await searchIssueKeys(jql, 'app', MAX_ISSUES_PER_RULE_SCAN)) {
+          await routeIssue({ rule, issueKey: key, trigger: rule.trigger, groups, ctxByRule, source: `scheduled:${rule.trigger}`, dryRun });
         }
-      }
-    }
-
-    if (started.length) {
-      const relevant = rules.filter(r => r.trigger === 'shiftStart' && (r.shiftGroupIds || []).includes(group.id)).sort((a, b) => (a.priority ?? 1000) - (b.priority ?? 1000));
-      for (const rule of relevant) {
-        const jql = `${projectJql(rule)}statusCategory != Done AND assignee is EMPTY`;
-        const issues = await searchIssues(jql, 'app', 50);
-        for (const item of issues) {
-          const simulation = await simulateInternal({ issueKey: item.key, trigger: 'shiftStart', actor: 'app' });
-          await executeSimulation(simulation, { actor: 'app', source: 'scheduled:shiftStart', respectCooldown: true });
-        }
+      } catch (error) {
+        console.error(`Shift boundary scan failed for rule ${rule.id}`, error);
       }
     }
   }
@@ -301,8 +269,10 @@ resolver.define('getDashboard', async () => {
     if (changed) await kvs.set(`${SHIFT_PREFIX}${group.id}`, persisted);
     enriched.push(enrichGroup(persisted, at));
   }
-  const rules = (await listByPrefix(RULE_PREFIX, 100)).sort((a, b) => (a.priority ?? 1000) - (b.priority ?? 1000));
-  return { generatedAt: at.toISOString(), groups: enriched, rules, onShiftCount: enriched.reduce((sum, g) => sum + g.onShift.length, 0), enabledRuleCount: rules.filter(r => r.enabled).length };
+  const rules = (await listRules()).sort(byPriority);
+  let routingMode = 'off';
+  try { routingMode = await getRoutingMode(); } catch { /* shown as off */ }
+  return { generatedAt: at.toISOString(), version: APP_VERSION, routingMode, groups: enriched, rules, onShiftCount: enriched.reduce((sum, g) => sum + g.onShift.length, 0), enabledRuleCount: rules.filter(r => r.enabled).length };
 });
 
 resolver.define('getRoster', async ({ payload }) => {
@@ -329,9 +299,49 @@ resolver.define('saveShiftGroup', async ({ payload }) => {
   const raw = payload?.group || {};
   const group = normaliseGroup(raw);
   group.memberProfiles = memberProfilesFromPayload(raw);
-  group.overrides = Array.isArray(raw.overrides) ? raw.overrides : [];
+  // Cover/absence entries have their own resolvers; keep what's stored so an edit form opened
+  // before a cover was added can't drop it.
+  const existing = raw.id ? await kvs.get(`${SHIFT_PREFIX}${group.id}`) : null;
+  group.overrides = normaliseOverrides(existing ? existing.overrides : raw.overrides, group.memberAccountIds);
   await kvs.set(`${SHIFT_PREFIX}${group.id}`, group);
   return group;
+});
+
+resolver.define('setShiftGroupEnabled', async ({ payload }) => {
+  await assertAdmin();
+  const id = String(payload?.id || '').trim();
+  const existing = id ? await kvs.get(`${SHIFT_PREFIX}${id}`) : null;
+  if (!existing) throw new Error('Shift group not found.');
+  const updated = { ...existing, enabled: payload?.enabled !== false, updatedAt: new Date().toISOString() };
+  await kvs.set(`${SHIFT_PREFIX}${id}`, updated);
+  return updated;
+});
+
+// Cover/absence entries are changed on their own so a save can't overwrite the group's hours or members.
+resolver.define('saveShiftOverride', async ({ payload }) => {
+  await assertAdmin();
+  const groupId = String(payload?.groupId || '').trim();
+  const key = `${SHIFT_PREFIX}${groupId}`;
+  const group = groupId ? await kvs.get(key) : null;
+  if (!group) throw new Error('Shift group not found.');
+  const accountId = String(payload?.accountId || '').trim();
+  if (!(group.memberAccountIds || []).includes(accountId)) throw new Error('Selected user is not a member of this shift group.');
+  const profile = (group.memberProfiles || []).find(p => p.accountId === accountId);
+  const [override] = normaliseOverrides([{ accountId, displayName: profile?.displayName, type: payload?.type, startAt: payload?.startAt, endAt: payload?.endAt }], group.memberAccountIds);
+  if (!override) throw new Error('Enter a valid start and end time.');
+  await kvs.set(key, { ...group, overrides: [...(group.overrides || []), override], updatedAt: new Date().toISOString() });
+  return override;
+});
+
+resolver.define('deleteShiftOverride', async ({ payload }) => {
+  await assertAdmin();
+  const groupId = String(payload?.groupId || '').trim();
+  const overrideId = String(payload?.overrideId || '').trim();
+  const key = `${SHIFT_PREFIX}${groupId}`;
+  const group = groupId ? await kvs.get(key) : null;
+  if (!group || !overrideId) throw new Error('Shift group and override are required.');
+  await kvs.set(key, { ...group, overrides: (group.overrides || []).filter(o => o.id !== overrideId), updatedAt: new Date().toISOString() });
+  return { ok: true };
 });
 
 resolver.define('deleteShiftGroup', async ({ payload }) => {
@@ -397,7 +407,7 @@ resolver.define('simulateAssignment', async ({ payload }) => {
   const issueKey = String(payload?.issueKey || '').trim().toUpperCase();
   const trigger = String(payload?.trigger || 'issueCreated');
   if (!issueKey) throw new Error('Issue key is required.');
-  return simulateInternal({ issueKey, trigger, actor: 'user' });
+  return (await simulateInternal({ issueKey, trigger, actor: 'user' })).simulation;
 });
 
 resolver.define('executeAssignment', async ({ payload }) => {
@@ -405,28 +415,54 @@ resolver.define('executeAssignment', async ({ payload }) => {
   const issueKey = String(payload?.issueKey || '').trim().toUpperCase();
   const trigger = String(payload?.trigger || 'issueCreated');
   if (!issueKey) throw new Error('Issue key is required.');
-  const simulation = await simulateInternal({ issueKey, trigger, actor: 'user' });
-  return executeSimulation(simulation, { actor: 'user', source: 'manual-execute', respectCooldown: false });
+  const { simulation, ctx } = await simulateInternal({ issueKey, trigger, actor: 'user' });
+  if (!ctx) return { ...simulation, executed: false };
+  return executeDecision(simulation, ctx, { actor: 'user', source: 'manual-execute', respectCooldown: false });
 });
 
 resolver.define('getAuditLog', async () => {
   await assertAdmin();
-  return (await listByPrefix(AUDIT_PREFIX, 100)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
+  const recent = await listByPrefix(AUDIT_PREFIX, 100);
+  if (recent.length >= 100) return recent;
+  // Legacy entries were stored oldest-first, so they have to be read in full before sorting.
+  const legacy = await listByPrefix(LEGACY_AUDIT_PREFIX, 1000);
+  return newestFirst([...recent, ...legacy], 100);
 });
 
-resolver.define('health', async () => ({ ok: true, version: '0.5.0', time: new Date().toISOString() }));
+resolver.define('getAuditSettings', async () => {
+  await assertAdmin();
+  return { retentionDays: await getAuditRetentionDays(), options: RETENTION_OPTIONS };
+});
 
-export async function jiraEventHandler(event) {
+resolver.define('setAuditRetention', async ({ payload }) => {
+  await assertAdmin();
+  const retentionDays = normaliseRetentionDays(payload?.retentionDays);
+  await kvs.set(AUDIT_RETENTION_KEY, retentionDays);
+  return { retentionDays, options: RETENTION_OPTIONS };
+});
+
+resolver.define('health', async () => ({ ok: true, version: APP_VERSION, time: new Date().toISOString() }));
+
+// Core handlers are only called through background.js, which applies the routing mode.
+// They default to dry-run so a direct call can never change Jira by accident.
+export async function jiraEventHandler(event, _context, { dryRun = true } = {}) {
   const triggers = deriveEventTriggers(event);
   const issueKey = String(event?.issue?.key || '').trim().toUpperCase();
   if (!issueKey || !triggers.length) return;
-  const simulation = await simulateTriggersInternal({ issueKey, triggers, actor: 'app' });
-  await executeSimulation(simulation, { actor: 'app', source: `event:${event.eventType}`, respectCooldown: true });
+  const candidates = (await listRules()).filter(r => r.enabled && triggers.includes(r.trigger)).sort(byPriority);
+  if (!candidates.length) return;
+  const jiraIssue = await getIssue(issueKey, 'app');
+  const issue = toIssueModel(jiraIssue);
+  const rule = candidates.find(r => ruleMatches({ rule: r, trigger: r.trigger, issue }));
+  if (!rule) return;
+  const ctx = await buildRuleContext({ rule, groups: await listShiftGroups(), actor: 'app', dryRun });
+  await executeDecision(decide(ctx, jiraIssue, rule.trigger), ctx, { actor: 'app', source: `event:${event.eventType}`, respectCooldown: true });
 }
 
-export async function scheduledHandler() {
-  await scanShiftTransitions();
-  await scanTemporalRules();
+export async function scheduledHandler(_request, _context, { dryRun = true } = {}) {
+  const [rules, groups] = await Promise.all([listRules(), listShiftGroups()]);
+  await scanShiftTransitions({ rules, groups, dryRun });
+  await scanTemporalRules({ rules, groups, dryRun });
 }
 
 export const handler = resolver.getDefinitions();
