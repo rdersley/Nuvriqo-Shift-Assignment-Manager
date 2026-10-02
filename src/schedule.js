@@ -21,7 +21,7 @@ function enrich(group, at) {
     name: group.name,
     timezone: group.timezone,
     recurringSchedule: group.recurringSchedule || [],
-    members: (group.memberAccountIds || []).map(accountId => ({ accountId, displayName: names[accountId] || accountId })),
+    members: (group.memberAccountIds || []).map(accountId => ({ accountId, displayName: names[accountId] || accountId, personalSchedule: group.memberSchedules?.[accountId] || null })),
     onShift: ids.map(accountId => ({ accountId, displayName: names[accountId] || accountId }))
   };
 }

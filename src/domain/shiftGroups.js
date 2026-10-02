@@ -47,10 +47,16 @@ export function normaliseGroup(input = {}, now = new Date()) {
   const timezone = String(input.timezone || 'Europe/Dublin').trim();
   // `schedule` is the "same hours every day" shape; `recurringSchedule` carries per-day hours.
   const recurringSchedule = input.schedule ? normaliseSchedule(input.schedule) : normaliseEntries(input.recurringSchedule || []);
+  const memberSchedules = normaliseMemberSchedules(input.memberSchedules, memberAccountIds);
 
   if (!name) throw new Error('Shift group name is required.');
   if (!memberAccountIds.length) throw new Error('Select at least one Jira user.');
-  if (!recurringSchedule.length) throw new Error('Select at least one working day.');
+  // Group hours are optional when every member has their own (e.g. an imported rota).
+  if (!recurringSchedule.length && !memberAccountIds.every(id => memberSchedules[id])) {
+    throw new Error(Object.keys(memberSchedules).length
+      ? 'Select group working days for members without their own hours.'
+      : 'Select at least one working day.');
+  }
 
   try {
     new Intl.DateTimeFormat('en-GB', { timeZone: timezone }).format(now);
@@ -65,9 +71,19 @@ export function normaliseGroup(input = {}, now = new Date()) {
     enabled: input.enabled !== false,
     memberAccountIds,
     recurringSchedule,
+    memberSchedules,
     createdAt: input.createdAt || stamp,
     updatedAt: stamp
   };
+}
+
+// { accountId: [{ day, start, end }] } for current members only; empty schedules are dropped.
+export function normaliseMemberSchedules(input, memberAccountIds = []) {
+  if (!input || typeof input !== 'object') return {};
+  return Object.fromEntries(Object.entries(input)
+    .filter(([accountId]) => memberAccountIds.includes(accountId))
+    .map(([accountId, entries]) => [accountId, normaliseEntries(Array.isArray(entries) ? entries : [])])
+    .filter(([, entries]) => entries.length));
 }
 
 // Cover/absence entries come from the admin UI; keep only well-formed ones for current members.

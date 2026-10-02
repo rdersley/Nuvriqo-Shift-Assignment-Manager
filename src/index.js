@@ -2,7 +2,10 @@ import Resolver from '@forge/resolver';
 import api, { route } from '@forge/api';
 import { kvs } from '@forge/kvs';
 import { getOnShiftMembers } from './domain/shifts.js';
-import { normaliseGroup, normaliseOverrides } from './domain/shiftGroups.js';
+import { normaliseGroup, normaliseOverrides, normaliseMemberSchedules } from './domain/shiftGroups.js';
+import { parseRota } from './domain/rota.js';
+import { matchUser } from './domain/userMatch.js';
+import { decodeBase64File, readDelimitedText, readFirstSheet } from './lib/xlsx.js';
 import { matchingRules, ruleMatches } from './engine/rules.js';
 import { decideForRule } from './engine/assignment.js';
 import { cooldownMinutesForRule, deriveEventTriggers, diffShiftState, executionIsCoolingDown } from './engine/triggers.js';
@@ -296,12 +299,14 @@ resolver.define('getRoster', async ({ payload }) => {
 
 resolver.define('saveShiftGroup', async ({ payload }) => {
   await assertAdmin();
-  const raw = payload?.group || {};
+  let raw = payload?.group || {};
+  const existing = raw.id ? await kvs.get(`${SHIFT_PREFIX}${raw.id}`) : null;
+  // A form that doesn't send per-person hours (older client, or none edited) keeps the stored ones.
+  if (raw.memberSchedules === undefined && existing?.memberSchedules) raw = { ...raw, memberSchedules: existing.memberSchedules };
   const group = normaliseGroup(raw);
   group.memberProfiles = memberProfilesFromPayload(raw);
   // Cover/absence entries have their own resolvers; keep what's stored so an edit form opened
   // before a cover was added can't drop it.
-  const existing = raw.id ? await kvs.get(`${SHIFT_PREFIX}${group.id}`) : null;
   group.overrides = normaliseOverrides(existing ? existing.overrides : raw.overrides, group.memberAccountIds);
   await kvs.set(`${SHIFT_PREFIX}${group.id}`, group);
   return group;
@@ -342,6 +347,74 @@ resolver.define('deleteShiftOverride', async ({ payload }) => {
   if (!group || !overrideId) throw new Error('Shift group and override are required.');
   await kvs.set(key, { ...group, overrides: (group.overrides || []).filter(o => o.id !== overrideId), updatedAt: new Date().toISOString() });
   return { ok: true };
+});
+
+async function searchJiraUsers(query) {
+  const res = await api.asUser().requestJira(route`/rest/api/3/user/search?query=${query}&maxResults=20`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+async function matchRotaName(name) {
+  let users = await searchJiraUsers(name);
+  // Jira may hold a shorter or longer form of the name; fall back to the surname, then the first name.
+  for (const part of [name.split(' ').slice(-1)[0], name.split(' ')[0]]) {
+    if (matchUser(name, users).match || !part || part.length < 3) break;
+    const more = await searchJiraUsers(part);
+    users = [...new Map([...users, ...more].map(u => [u.accountId, u])).values()];
+  }
+  return matchUser(name, users);
+}
+
+function readRotaGrid(payload = {}) {
+  if (payload.fileData) {
+    const name = String(payload.fileName || '').toLowerCase();
+    const bytes = decodeBase64File(payload.fileData);
+    if (name.endsWith('.csv') || name.endsWith('.tsv') || name.endsWith('.txt')) return readDelimitedText(Buffer.from(bytes).toString('utf8'));
+    return readFirstSheet(bytes);
+  }
+  if (String(payload.text || '').trim()) return readDelimitedText(payload.text);
+  throw new Error('Choose a rota file or paste the rota cells.');
+}
+
+resolver.define('previewRota', async ({ payload }) => {
+  await assertAdmin();
+  const offsetHours = Number(payload?.offsetHours || 0);
+  if (!Number.isFinite(offsetHours) || Math.abs(offsetHours) > 14) throw new Error('Time adjustment must be between -14 and +14 hours.');
+  const { people, skipped, rowCount } = parseRota(readRotaGrid(payload), { offsetHours });
+  const matched = await Promise.all(people.map(async person => ({ ...person, ...(await matchRotaName(person.name).catch(() => ({ match: null, candidates: [] }))) })));
+  return { people: matched, skipped, rowCount, offsetHours };
+});
+
+// Adds or updates each person's own hours in a shift group, creating the group if needed.
+// Members already in the group but not in the import are left as they are.
+resolver.define('importRota', async ({ payload }) => {
+  await assertAdmin();
+  const people = (payload?.people || []).filter(p => p?.accountId && Array.isArray(p.schedule) && p.schedule.length);
+  if (!people.length) throw new Error('Nothing to import: select a Jira user for at least one person.');
+  const groupId = String(payload?.groupId || '').trim();
+  const existing = groupId ? await kvs.get(`${SHIFT_PREFIX}${groupId}`) : null;
+  if (groupId && !existing) throw new Error('Shift group not found.');
+
+  const memberAccountIds = [...new Set([...(existing?.memberAccountIds || []), ...people.map(p => String(p.accountId))])];
+  const memberSchedules = { ...(existing?.memberSchedules || {}) };
+  for (const person of people) memberSchedules[person.accountId] = person.schedule;
+  const profiles = new Map((existing?.memberProfiles || []).map(p => [p.accountId, p]));
+  for (const person of people) profiles.set(person.accountId, { accountId: String(person.accountId), displayName: String(person.displayName || person.accountId) });
+
+  const group = normaliseGroup({
+    ...(existing || {}),
+    id: existing?.id,
+    name: existing?.name || payload?.newGroup?.name,
+    timezone: existing?.timezone || payload?.newGroup?.timezone || 'Europe/Dublin',
+    memberAccountIds,
+    recurringSchedule: existing?.recurringSchedule || [],
+    memberSchedules: normaliseMemberSchedules(memberSchedules, memberAccountIds)
+  });
+  group.memberProfiles = [...profiles.values()].filter(p => memberAccountIds.includes(p.accountId));
+  group.overrides = normaliseOverrides(existing?.overrides, memberAccountIds);
+  await kvs.set(`${SHIFT_PREFIX}${group.id}`, group);
+  return { group, imported: people.length };
 });
 
 resolver.define('deleteShiftGroup', async ({ payload }) => {
