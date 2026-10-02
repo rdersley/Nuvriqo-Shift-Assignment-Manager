@@ -44,7 +44,7 @@ export default function RotaImport({ groups = [], onImported }) {
       const result = await invoke('importRota', {
         groupId: target.value === NEW_GROUP ? '' : target.value,
         newGroup: { name: newName, timezone: 'Europe/Dublin' },
-        people: selected.map(({ person, user }) => ({ accountId: user.accountId, displayName: user.displayName, schedule: person.schedule }))
+        people: selected.map(({ person, user }) => ({ accountId: user.accountId, displayName: user.displayName, role: person.role, schedule: person.schedule }))
       });
       setMessage({ type: 'success', text: `Imported ${result.imported} people into "${result.group.name}". Check the group on the Dashboard before relying on it for routing.` });
       setPreview(null);

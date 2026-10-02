@@ -15,8 +15,10 @@ test('saved shift members render display names', () => {
   assert.match(ui, /group\.members/);
 });
 
-test('schedule exposes day week and month views', () => {
-  for (const label of ['Day', 'Week', 'Month', 'No assignment coverage']) assert.ok(ui.includes(label), `missing ${label}`);
+test('schedule exposes day, week and four-week views with coverage analysis', async () => {
+  const roster = await readFile(new URL('../src/frontend/RosterView.jsx', import.meta.url), 'utf8');
+  for (const label of ['Day', 'Week', '4 weeks', 'Rota', 'Coverage', 'Nobody on shift', 'Minimum met']) assert.ok(roster.includes(label), `missing ${label}`);
+  assert.ok(ui.includes('<RosterView resolverName="getRoster" canEditMinimum'));
 });
 
 test('rule builder exposes all V1 triggers', () => {

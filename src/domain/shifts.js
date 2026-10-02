@@ -8,15 +8,18 @@ function minutes(hhmm) {
   return h * 60 + m;
 }
 
-function localParts(date, timeZone) {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone,
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23'
-  }).formatToParts(date);
-  const obj = Object.fromEntries(parts.map(p => [p.type, p.value]));
+const formatters = new Map();
+function formatterFor(timeZone) {
+  if (!formatters.has(timeZone)) {
+    formatters.set(timeZone, new Intl.DateTimeFormat('en-GB', { timeZone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }));
+  }
+  return formatters.get(timeZone);
+}
+
+// Weekday and minute of day at `date` in `timeZone`. Roster calculations reuse one result for every
+// member of a group, so the Intl call is made once per time step rather than once per person.
+export function localParts(date, timeZone) {
+  const obj = Object.fromEntries(formatterFor(timeZone).formatToParts(date).map(p => [p.type, p.value]));
   return {
     day: obj.weekday.toLowerCase().slice(0, 3),
     minuteOfDay: Number(obj.hour) * 60 + Number(obj.minute)
@@ -46,24 +49,36 @@ function overrideApplies(override, accountId, at) {
   return at >= start && at < end;
 }
 
-export function isMemberOnShift({ shiftGroup, accountId, at = new Date(), overrides = [] }) {
-  if (!shiftGroup?.enabled || !shiftGroup.memberAccountIds?.includes(accountId)) return false;
-  const activeOverrides = overrides.filter(o => overrideApplies(o, accountId, at));
-  if (activeOverrides.some(o => o.type === 'exclude')) return false;
-  if (activeOverrides.some(o => o.type === 'include')) return true;
-
-  const { day, minuteOfDay } = localParts(at, shiftGroup.timezone || 'UTC');
-  return scheduleForMember(shiftGroup, accountId).some(s => scheduleMatches(s, day, minuteOfDay));
-}
-
 // A member's own hours, when set, replace the group's hours for that member.
 export function scheduleForMember(shiftGroup, accountId) {
   const personal = shiftGroup?.memberSchedules?.[accountId];
   return personal?.length ? personal : (shiftGroup?.recurringSchedule || []);
 }
 
+// Recurring hours only, ignoring cover/absence. `parts` comes from localParts for the group's timezone.
+export function isScheduledAt(shiftGroup, accountId, parts) {
+  return scheduleForMember(shiftGroup, accountId).some(s => scheduleMatches(s, parts.day, parts.minuteOfDay));
+}
+
+// 'exclude' wins over 'include'; null when no cover/absence entry applies.
+export function overrideStateAt(overrides = [], accountId, at) {
+  const active = overrides.filter(o => overrideApplies(o, accountId, at));
+  if (active.some(o => o.type === 'exclude')) return 'exclude';
+  if (active.some(o => o.type === 'include')) return 'include';
+  return null;
+}
+
+export function isMemberOnShift({ shiftGroup, accountId, at = new Date(), overrides = [], parts }) {
+  if (!shiftGroup?.enabled || !shiftGroup.memberAccountIds?.includes(accountId)) return false;
+  const override = overrideStateAt(overrides, accountId, at);
+  if (override === 'exclude') return false;
+  if (override === 'include') return true;
+  return isScheduledAt(shiftGroup, accountId, parts || localParts(at, shiftGroup.timezone || 'UTC'));
+}
+
 export function getOnShiftMembers({ shiftGroup, at = new Date(), overrides = [] }) {
+  const parts = localParts(at, shiftGroup.timezone || 'UTC');
   return (shiftGroup.memberAccountIds || []).filter(accountId =>
-    isMemberOnShift({ shiftGroup, accountId, at, overrides })
+    isMemberOnShift({ shiftGroup, accountId, at, overrides, parts })
   );
 }
