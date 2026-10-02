@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { BarChart, Box, Button, ButtonGroup, DynamicTable, Heading, Inline, Label, Lozenge, SectionMessage, Select, Spinner, Stack, Tab, TabList, TabPanel, Tabs, Text, Tooltip } from '@forge/react';
 import { invoke } from '@forge/bridge';
+import Timeline from './Timeline.jsx';
 
 const tile = { borderWidth: 'border.width', borderStyle: 'solid', borderColor: 'color.border', borderRadius: 'border.radius', padding: 'space.150', minWidth: '140px' };
 const RANGES = [{ days: 1, label: 'Day' }, { days: 7, label: 'Week' }, { days: 28, label: '4 weeks' }];
@@ -174,7 +175,7 @@ export default function RosterView({ resolverName, canEditMinimum = false, refre
     {loading && !data && <Spinner size="large" />}
 
     {data && <Tabs id="roster-tabs">
-      <TabList><Tab>Rota</Tab><Tab>Coverage</Tab></TabList>
+      <TabList><Tab>Rota</Tab><Tab>Timeline</Tab><Tab>Coverage</Tab></TabList>
       <TabPanel><Box xcss={{ paddingTop: 'space.200' }}>
         {!data.people.length && <SectionMessage appearance="information"><Text>No shift groups to show yet.</Text></SectionMessage>}
         {data.people.length > 0 && data.days > 7 && <SectionMessage appearance="information"><Text>Choose Day or Week to see each person's shifts. The Coverage tab covers all four weeks.</Text></SectionMessage>}
@@ -194,6 +195,9 @@ export default function RosterView({ resolverName, canEditMinimum = false, refre
             <Box xcss={{ overflowX: 'auto' }}><DynamicTable head={rotaHead} rows={section.rows} /></Box>
           </Stack></Box>)}
         </Stack>}
+      </Box></TabPanel>
+      <TabPanel><Box xcss={{ paddingTop: 'space.200' }}>
+        {data.people.length ? <Timeline data={data} /> : <SectionMessage appearance="information"><Text>No shift groups to show yet.</Text></SectionMessage>}
       </Box></TabPanel>
       <TabPanel><Box xcss={{ paddingTop: 'space.200' }}><Stack space="space.200">
         <Inline space="space.150" shouldWrap>
