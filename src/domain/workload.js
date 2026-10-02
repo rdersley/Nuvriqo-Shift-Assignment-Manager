@@ -113,12 +113,27 @@ export function analyseWorkload({ issues = [], staffing = { stepMinutes: 15, ser
 
   // Hour of day profile (averaged over the period's days).
   const dayCount = Math.max(1, (period.to - period.from) / (24 * HOUR));
+  const resolvedByHour = Array(24).fill(0);
+  for (const issue of resolvedInPeriod) resolvedByHour[hourOfWeek(new Date(issue.resolvedAt), timeZone) % 24] += 1;
   const byHourOfDay = Array.from({ length: 24 }, (_, h) => {
     let tickets = 0; let agentAvg = 0;
     for (let d = 0; d < 7; d += 1) { tickets += demand[d * 24 + h]; agentAvg += agents[d * 24 + h]; }
     const pickups = created.filter(i => hourOfWeek(new Date(i.createdAt), timeZone) % 24 === h).map(i => i.timings.pickupMs);
-    return { hour: `${String(h).padStart(2, '0')}:00`, ticketsPerDay: round1(tickets / dayCount), agents: round1(agentAvg / 7), medianPickupHours: toHours(median(pickups)), count: pickups.length };
+    return {
+      hour: `${String(h).padStart(2, '0')}:00`,
+      ticketsPerDay: round1(tickets / dayCount), resolvedPerDay: round1(resolvedByHour[h] / dayCount),
+      createdTotal: tickets, resolvedTotal: resolvedByHour[h],
+      agents: round1(agentAvg / 7), medianPickupHours: toHours(median(pickups)), count: pickups.length
+    };
   });
+  // Busiest hours for arrivals and for resolutions, and how far apart they are.
+  const peakHour = key => byHourOfDay.reduce((best, h) => (h[key] > best[key] ? h : best), byHourOfDay[0]);
+  const flow = {
+    peakCreatedHour: created.length ? peakHour('createdTotal').hour : null,
+    peakResolvedHour: resolvedInPeriod.length ? peakHour('resolvedTotal').hour : null,
+    // Hours where more arrive than get resolved on average, i.e. when the queue builds.
+    buildingHours: byHourOfDay.filter(h => h.createdTotal > h.resolvedTotal).map(h => h.hour)
+  };
 
   // Daily trend.
   const trend = new Map();
@@ -261,7 +276,7 @@ export function analyseWorkload({ issues = [], staffing = { stepMinutes: 15, ser
   recommendations.sort((a, b) => order[a.severity] - order[b.severity]);
 
   return {
-    summary, heat, byHourOfDay, trend: [...trend.values()], agents: agentRows,
+    summary, heat, byHourOfDay, flow, trend: [...trend.values()], agents: agentRows,
     byPriority: breakdown(enriched, i => i.priority, i => i.priority),
     byType: breakdown(enriched, i => i.requestType || i.issueType, i => i.requestType || i.issueType),
     recommendations, weeks: round1(weeks), peakCell: cellLabel(perWeek.indexOf(Math.max(...perWeek)))

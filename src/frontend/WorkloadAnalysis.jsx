@@ -60,6 +60,10 @@ export default function WorkloadAnalysis({ projectOptions = [] }) {
     { hour: h.hour, value: h.agents, series: 'Agents on shift (average)' }
   ]);
   const trend = (data?.trend || []).flatMap(d => [{ date: d.date.slice(5), value: d.created, series: 'Created' }, { date: d.date.slice(5), value: d.resolved, series: 'Resolved' }]);
+  const createdVsResolved = (data?.byHourOfDay || []).flatMap(h => [
+    { hour: h.hour, value: h.ticketsPerDay, series: 'Created' },
+    { hour: h.hour, value: h.resolvedPerDay, series: 'Resolved' }
+  ]);
   const pickupByHour = (data?.byHourOfDay || []).map(h => ({ hour: h.hour, value: h.medianPickupHours || 0 }));
 
   const heatHead = { cells: [{ key: 'day', content: 'Day' }, ...Array.from({ length: 24 }, (_, h) => ({ key: `h${h}`, content: String(h).padStart(2, '0') }))] };
@@ -105,6 +109,10 @@ export default function WorkloadAnalysis({ projectOptions = [] }) {
       </Inline>
 
       <Box xcss={card}><LineChart showBorder={false} data={demandVsAgents} xAccessor="hour" yAccessor="value" colorAccessor="series" title="Demand vs staffing by hour of day" subtitle="Average tickets created per day in each hour, against the average agents on shift" height={300} /></Box>
+      <Box xcss={card}><Stack space="space.100">
+        <BarChart showBorder={false} data={createdVsResolved} xAccessor="hour" yAccessor="value" colorAccessor="series" title="Created vs resolved by hour of day" subtitle="Average tickets per day created and resolved in each hour (Irish time)" height={300} />
+        {data.flow?.peakCreatedHour && <Text size="small" color="color.text.subtle">{`Most tickets arrive around ${data.flow.peakCreatedHour}${data.flow.peakResolvedHour ? ` and most are resolved around ${data.flow.peakResolvedHour}` : ''}.${data.flow.buildingHours.length ? ` The queue builds (more created than resolved) in ${data.flow.buildingHours.length} of 24 hours: ${data.flow.buildingHours.slice(0, 8).join(', ')}${data.flow.buildingHours.length > 8 ? '…' : ''}.` : ''}`}</Text>}
+      </Stack></Box>
       <Box xcss={card}><BarChart showBorder={false} data={pickupByHour} xAccessor="hour" yAccessor="value" title="Time to pick up by hour created" subtitle="Median hours before a ticket created in that hour moved out of To Do" height={260} /></Box>
       {trend.length > 1 && <Box xcss={card}><LineChart showBorder={false} data={trend} xAccessor="date" yAccessor="value" colorAccessor="series" title="Created vs resolved per day" height={260} /></Box>}
 
