@@ -32,4 +32,4 @@ npm install
 npm run check   # syntax check, bundle every Forge entry point, run tests
 ```
 
-Pushing to `main` deploys to the Forge **development** environment and upgrades the Nuvriqo test site. The retailinmotion work site runs the same development environment, so a push to `main` updates it too. Pull requests only run the checks.
+Pushing to `main` deploys to the Forge **development** environment and upgrades the Nuvriqo test site. The Retail inMotion sites are moving to the separate Retail inMotion edition (its own repository and Forge app). Until this app is uninstalled from the Retail inMotion work site, a push to `main` still updates it there. Pull requests only run the checks.
