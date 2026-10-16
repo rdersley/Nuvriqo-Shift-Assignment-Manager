@@ -55,7 +55,7 @@ test('manifest has one normal admin page, one Configure safety page and the back
   assert.equal(adminPageEntries.length, 3);
   assert.ok(adminPageEntries.some((entry) => entry.endsWith('nuvriqo-shift-assignment-backup')));
   // Forge allows one normal admin page: the others must be the Configure and Get started pages.
-  assert.match(manifest, /nuvriqo-shift-assignment-backup[sS]*?useAsGetStarted: true/);
+  assert.match(manifest, /nuvriqo-shift-assignment-backup[\s\S]*?useAsGetStarted: true/);
   assert.match(manifest, /title: Shift & Assignment Manager/);
   assert.match(manifest, /title: Shift Manager Routing Safety/);
   assert.ok(!manifest.includes('Shift Cover & Exceptions'));
