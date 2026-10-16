@@ -20,6 +20,8 @@ modules:
       resolver:
         function: backup-resolver
       title: Shift & Assignment Manager backup & restore
+      # Forge allows one normal admin page; this one is the app's "Get started" page.
+      useAsGetStarted: true
   jira:projectPage:
     - key: nuvriqo-shift-schedule-project-page
       resource: schedule-ui
